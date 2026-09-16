@@ -1,0 +1,68 @@
+{
+  "manifest_version": "0.3",
+  "name": "wing-rack-mcp",
+  "display_name": "WING Rack (v0.3.1)",
+  "version": "0.3.1",
+  "description": "Controls the Behringer WING Rack over OSC on the LAN. No credentials: the desk is unauthenticated UDP, so nothing is read from Credential Manager and no secret exists to store. The command profile is generated off the hardware; 15 destructive or action addresses are excluded from the writable set and unreachable from any tool. String values carrying a space or comma are written to their own leaf address and read back to confirm, because the node key=value form silently strips spaces and splits on commas. wing_push_file pushes a complete show file as a background job Claude can trigger and poll (wing_push_status), retrying the whole push up to three times on failure; it replaces wing_push_show, retired in this version. v0.3.1: a show file that omits keys on a node writes the keys it gives and reports the omitted ones as partial; only a model-only node (mdl and nothing else) is withheld.",
+  "author": {
+    "name": "Doug Wright"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "server/server.py",
+    "mcp_config": {
+      "command": "python",
+      "args": [
+        "${__dirname}/server/server.py"
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "verify_connection",
+      "description": "Health check. Returns SERVER_VERSION, the loaded profile's firmware and node count, and which desk is connected."
+    },
+    {
+      "name": "wing_list_consoles",
+      "description": "Every WING answering on the network: console name, address, model, serial, firmware."
+    },
+    {
+      "name": "wing_connect",
+      "description": "Connect to a desk by console name. Never by address."
+    },
+    {
+      "name": "wing_get",
+      "description": "Read one or more nodes: current values, read-only flags, legal ranges and child nodes."
+    },
+    {
+      "name": "wing_set",
+      "description": "Write named parameters to one node in a single OSC message. Whole-message validation; nothing is sent if any key fails."
+    },
+    {
+      "name": "wing_dump",
+      "description": "Read a subtree to a show file, walking child by child around the desk's reply buffer limit."
+    },
+    {
+      "name": "wing_push_file",
+      "description": "Push a complete show file as a background job and return a job id immediately. No confirm token. Retries the whole push up to three times on failure; one push at a time, never queued."
+    },
+    {
+      "name": "wing_push_status",
+      "description": "Poll a background push: state, nodes done against total, elapsed seconds, a running failure count, and the report file's path."
+    },
+    {
+      "name": "wing_generate_profile",
+      "description": "Re-walk the desk and rebuild the command profile. Run after a firmware change."
+    }
+  ],
+  "compatibility": {
+    "platforms": [
+      "win32"
+    ]
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dwrightii/wing-mcp"
+  }
+}
