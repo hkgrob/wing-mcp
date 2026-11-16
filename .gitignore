@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+# Third-party reference documents are copyrighted; keep them out of the public repo.
+*.pdf
+dist/

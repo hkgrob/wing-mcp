@@ -10,7 +10,7 @@ input is the exclusion policy below, which names capabilities rather than
 addresses wherever it can.
 
     python wing_profile.py build ../outputs/WING-Profile_<fw>_<stamp>.json
-    python wing_profile.py show                     # summarize the built profile
+    python wing_profile.py show                     # list every profile it can load
     python wing_profile.py check /ch/1 name=Fiddle  # validate without sending
 """
 
@@ -20,7 +20,83 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# The profile the bundle has always shipped: generated on a WING Rack,
+# firmware 3.1-0. It stays here as the fallback of last resort.
 DEFAULT_PROFILE = os.path.join(HERE, "wing_profile.json")
+
+# Profiles are per MODEL. The full WING, the Compact and the Rack share one
+# firmware and almost all of one address tree, but the hardware-bound parts
+# (local I/O, talkback, GPIO, surface controls) are each desk's own, so a
+# profile names the model it was walked on and the server picks by the model
+# the connected desk reports in discovery.
+#
+# Search order for a model's profile:
+#   1. <user dir>/profiles/<model>.json   - generated on your own desk; lives
+#      outside the bundle so reinstalling or upgrading never overwrites it
+#   2. <bundle>/server/profiles/<model>.json - shipped with a release
+#   3. <bundle>/server/wing_profile.json  - the Rack profile, flagged as a
+#      model mismatch when the desk is not a Rack
+# The user dir is $WING_MCP_HOME if set, else ~/.wing-mcp on every platform.
+USER_DIR = os.environ.get("WING_MCP_HOME") or os.path.join(
+    os.path.expanduser("~"), ".wing-mcp")
+USER_PROFILES = os.path.join(USER_DIR, "profiles")
+BUNDLED_PROFILES = os.path.join(HERE, "profiles")
+
+
+# What discovery's model field and /$syscfg/$cnsmdl report for each desk,
+# per Patrick-Gilles Maillot's "WING Remote Protocols" (V 3.1.2-a): the
+# full-size desk is "ngc-full" (or "wing-bk"), not "wing". Hardware differs
+# where it shows: the full desk has 8 local Midas preamps against 24 on the
+# Rack and Compact, 2x2 GPIO against 1x2 on the Compact, and the Compact has
+# its own layer/user-control nodes. Unknown strings still work - they just
+# display as themselves.
+MODEL_NAMES = {
+    "ngc-full": "WING (full size)",
+    "wing-bk": "WING (full size, black)",
+    "wing": "WING (full size)",
+    "wing-rack": "WING Rack",
+    "wing-compact": "WING Compact",
+}
+
+
+def model_name(model):
+    return MODEL_NAMES.get(model_slug(model), model or "unknown")
+
+
+def model_slug(model):
+    """A discovery model string as a safe file stem: 'wing-rack' stays
+    'wing-rack'; anything odd collapses to dashes."""
+    s = re.sub(r"[^a-z0-9]+", "-", (model or "").strip().lower()).strip("-")
+    return s or "unknown"
+
+
+def profile_path_for(model, write=False):
+    """Where a model's profile is, or where a new one for it goes
+    (write=True: always the user dir)."""
+    name = model_slug(model) + ".json"
+    if write:
+        return os.path.join(USER_PROFILES, name)
+    for d in (USER_PROFILES, BUNDLED_PROFILES):
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def list_profiles():
+    """Every profile this install can load: path, where it came from."""
+    out = []
+    for origin, d in (("user", USER_PROFILES), ("bundled", BUNDLED_PROFILES)):
+        if os.path.isdir(d):
+            for fn in sorted(os.listdir(d)):
+                if fn.endswith(".json"):
+                    out.append({"model": fn[:-5], "origin": origin,
+                                "path": os.path.join(d, fn)})
+    if os.path.exists(DEFAULT_PROFILE):
+        out.append({"model": "wing-rack", "origin": "bundled-default",
+                    "path": DEFAULT_PROFILE})
+    return out
 
 
 # --------------------------------------------------------------- exclusions
@@ -47,7 +123,23 @@ EXCLUDED = [
 
     # Navigation on the recorder - harmless but pointless, and it is an action.
     (r"^/cards/wlive/\d+/\$ctl$", {"gotomarker"}, "recorder navigation"),
+
+    # v0.4.0: the desk's own network identity. A write here can take the
+    # desk off the network mid-show, and the only fix is at the surface.
+    # Found cross-checking the profile against "WING Remote Protocols"
+    # V 3.1.2-a, where every one of these is listed as settable.
+    (r"^/\$syscfg$", {"ip0", "ip1", "ip2", "ip3", "msk0", "msk1", "msk2", "msk3",
+                      "gw0", "gw1", "gw2", "gw3", "ipmode", "$ipapply", "eth_cfg"},
+     "desk network settings - a bad write drops the desk off the network"),
+
+    # Locks: either would lock remote control out until someone at the
+    # surface turns it back off.
+    (r"^/\$syscfg$", {"tcplock"}, "locks out TCP remote control (WING Edit etc.)"),
+    (r"^/\$ctl/(OSC|osc)$", {"ronly"}, "makes OSC read-only, locking this server out"),
 ]
+
+# Exclusion counts before v0.4.0 were 15; docs that still say "fifteen"
+# refer to the original list.
 
 # Parameters whose absence from a push would silently produce an invisible
 # result. See the project CLAUDE.md: a channel with clink=1 renders its
@@ -123,7 +215,7 @@ def validate(spec, value):
 
 # ----------------------------------------------------------------- building
 
-def build(map_path, out_path=DEFAULT_PROFILE):
+def build(map_path, out_path=None):
     with open(map_path, encoding="utf-8") as f:
         raw = json.load(f)
 
@@ -165,6 +257,9 @@ def build(map_path, out_path=DEFAULT_PROFILE):
             entry["params"][pname] = rec
         profile["nodes"][node] = entry
 
+    if out_path is None:
+        out_path = profile_path_for(profile["identity"].get("model"), write=True)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     profile["counts"] = counts
     profile["excluded"] = [{"node": n, "param": p, "reason": r}
                            for n, p, r in sorted(excluded_list)]
@@ -180,13 +275,49 @@ def build(map_path, out_path=DEFAULT_PROFILE):
 
 class Profile:
     def __init__(self, path=DEFAULT_PROFILE):
+        self.path = path
         with open(path, encoding="utf-8") as f:
             self.d = json.load(f)
         self.nodes = self.d["nodes"]
 
+    @classmethod
+    def for_model(cls, model):
+        """The best profile for a desk model. Check .model_matches(model)
+        afterwards: a fallback profile from another model loads, but the
+        caller must say so."""
+        p = profile_path_for(model) if model else None
+        return cls(p or DEFAULT_PROFILE)
+
     @property
     def firmware(self):
         return self.d.get("firmware", "unknown")
+
+    @property
+    def model(self):
+        return self.d.get("identity", {}).get("model", "unknown")
+
+    def model_matches(self, model):
+        return model_slug(self.model) == model_slug(model)
+
+    def find(self, query, limit=60):
+        """Addresses and parameter names containing every word of `query`
+        (case-insensitive), numbered nodes collapsed to one pattern so /ch/1
+        through /ch/40 come back as one hit. For finding a command when its
+        address isn't known."""
+        words = [w.lower() for w in query.split() if w]
+        pats = {}
+        for node, n in self.nodes.items():
+            pat = re.sub(r"/\d+(?=/|$)", "/N", node)
+            for pname, p in n["params"].items():
+                hay = ("%s/%s" % (pat, pname)).lower()
+                if all(w in hay for w in words):
+                    key = (pat, pname)
+                    if key not in pats:
+                        pats[key] = {"address": "%s/%s" % (pat, pname),
+                                     "example": "%s/%s" % (node, pname),
+                                     "mode": p["mode"], "type": p["type"]}
+        hits = sorted(pats.values(), key=lambda h: (len(h["address"]), h["address"]))
+        return hits[:limit], len(hits)
 
     def check_write(self, node, kv, desk=None):
         """kv is a dict of key -> value. Returns a list of problems, empty if
@@ -214,6 +345,12 @@ class Profile:
             doubtful.append(("%s is not a node on this desk" % node, None))
             n = {"params": {}}
         for k, v in kv.items():
+            # Policy first, from the rules above rather than the stored
+            # mode, so a rule added after a profile was built still applies.
+            why_ex = excluded_reason(node, k)
+            if why_ex:
+                problems.append("%s/%s is excluded: %s" % (node, k, why_ex))
+                continue
             p = n["params"].get(k)
             if p is None:
                 doubtful.append(("%s has no parameter %s" % (node, k), k))
@@ -254,8 +391,13 @@ class Profile:
     def identity_warning(self, node, kv):
         """A channel written with a name, colour or icon but no clink=0 will
         store the value and display nothing. Returns a warning or None."""
-        if not re.match(r"^/ch/\d+$", node):
-            return None
+        # Any node whose profile carries clink (channels and aux inputs on
+        # firmware 3.1), not only /ch - an aux named without clink=0 has the
+        # same invisible-name problem.
+        n = self.nodes.get(node)
+        if n is None or CLINK_KEY not in n.get("params", {}):
+            if not re.match(r"^/(ch|aux)/\d+$", node):
+                return None
         if not any(k in kv for k in IDENTITY_KEYS):
             return None
         if kv.get(CLINK_KEY) == "0" or kv.get(CLINK_KEY) == 0:
@@ -293,11 +435,13 @@ def main(argv):
         return 0
 
     if cmd == "show":
-        p = Profile()
-        c = p.d["counts"]
-        print("firmware %s   %d nodes   %d params (%d writable, %d r/o, %d excluded)"
-              % (p.firmware, len(p.nodes), c["params"], c["writable"],
-                 c["readonly"], c["excluded"]))
+        for e in list_profiles():
+            p = Profile(e["path"])
+            c = p.d["counts"]
+            print("%-12s %-16s fw %s   %d nodes   %d params (%d writable, %d r/o, "
+                  "%d excluded)  %s" % (p.model, e["origin"], p.firmware,
+                                        len(p.nodes), c["params"], c["writable"],
+                                        c["readonly"], c["excluded"], e["path"]))
         return 0
 
     if cmd == "check":

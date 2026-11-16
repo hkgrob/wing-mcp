@@ -1,24 +1,37 @@
-# WING Rack MCP
+# WING MCP
 
-An MCP server that lets Claude control a Behringer WING over OSC on your local network. It talks to the WING Rack, the WING Compact and the full WING. It is for people who build their own scenes: read any node, write named parameters, dump a subtree to a text file, edit it, and push it back.
+An MCP server that lets Claude control a Behringer WING over OSC on your local network: the full-size WING, the Compact and the Rack. It picks a command profile by the model the desk reports, and comes with a local web GUI that drives the same engine. It is for people who build their own scenes: read any node, write named parameters, dump a subtree to a text file, edit it, and push it back.
 
-Version 0.3.1 is the first public release.
+Version 0.4.0. See [CHANGELOG.md](CHANGELOG.md).
 
 ## What you need
 
-A WING on the same LAN as your computer. Claude Desktop. Python 3.12 or newer on PATH.
+A WING on the same LAN as your computer. Claude Desktop. Python 3.10 or newer with the `mcp` package (`mcp<2`) installed in it.
 
 There is no credential to enter: the desk speaks unauthenticated UDP on the LAN. Anything on your network that can reach the desk can control it.
 
-Windows is the tested platform. On macOS, `python` may be absent; if it is, edit `mcp_config.command` in `manifest.json` inside the bundle to `python3` before you install. Reports from macOS are welcome.
+**macOS:** the bundle starts the server through `server/launch.py`, which hands off to a Python 3.10+ that has `mcp` installed (Homebrew, python.org or pyenv), because Claude Desktop's PATH usually only reaches Apple's older `/usr/bin/python3`. The easy route: `brew install python@3.12`, then `/opt/homebrew/bin/python3.12 -m pip install --break-system-packages "mcp<2"`. To force one interpreter, run `launchctl setenv WING_MCP_PYTHON /path/to/python3` and restart Claude Desktop. macOS asks for Local Network permission the first time; allow it, or discovery finds nothing.
 
-## Install in five steps
+**Windows:** `python` on PATH, 3.10 or newer, with `python -m pip install "mcp<2"`.
 
-1. Confirm your interpreter and install the one dependency. Run `python --version` and check it reads 3.12 or newer, then `python -m pip install "mcp<2"`. Claude Desktop launches the server with whatever `python` is on your PATH, so the package has to be in that interpreter.
-2. Download `wing-rack-mcp-v0.3.1.mcpb` from Releases and install it in Claude Desktop, under Settings, then Connectors, then install from file. The connector appears as `WING Rack (v0.3.1)`.
+## Install
+
+1. Install the interpreter and `mcp` as above.
+2. Install `wing-mcp-v0.4.0.mcpb` in Claude Desktop: double-click the file, or go to Settings, then Extensions, then Advanced settings, then Install Extension.
 3. Put the computer on the same LAN as the desk.
-4. Ask Claude to run `wing_list_consoles`. It prints every WING answering on the network. Note the name of yours.
-5. Ask Claude to run `wing_connect` with that name, then `wing_get` on `/ch/1`. A channel of values coming back means you are done.
+4. Ask Claude to run `wing_list_consoles` and note your desk's name.
+5. Ask Claude to run `wing_connect` with that name, then `wing_get` on `/ch/1`.
+6. **Full-size WING or Compact:** run `wing_generate_profile` once. The bundle ships only the Rack's profile; until your desk has its own, `wing_connect` says so and writes are re-checked live wherever the Rack profile would refuse them. The walk is read-only, runs in the background (poll `wing_job_status`), takes several minutes, and saves to `~/.wing-mcp/profiles/<model>.json`, where reinstalls never touch it. Do it again after any firmware update.
+
+## Models
+
+| Desk | Reports as | Profile |
+| --- | --- | --- |
+| WING (full size) | `ngc-full` (or `wing-bk`) | build with `wing_generate_profile` |
+| WING Compact | `wing-compact` | build with `wing_generate_profile` |
+| WING Rack | `wing-rack` | shipped (firmware 3.1-0) |
+
+The three share firmware and nearly all of one address tree. They differ in the hardware: the number of local preamps, GPIO, talkback options and the surface's layer and user-control nodes. That is why each desk validates against its own walk.
 
 ## Tools
 
@@ -28,15 +41,23 @@ Windows is the tested platform. On macOS, `python` may be absent; if it is, edit
 | `wing_list_consoles` | Every WING answering on the network, with its name, address, model and firmware. |
 | `wing_connect` | Connects by console name, never by address. On a shared network an address match can land on another desk. |
 | `wing_get` | Reads one or more nodes: each parameter's value, read-only flag and legal range, plus the node's children. |
-| `wing_set` | Writes named parameters to one node as a single message. Validation is whole-message, so one bad key sends nothing. `dry_run` shows the payload without sending. |
-| `wing_dump` | Reads a subtree to a show file, walking child by child, because the desk cannot return a family root such as `/ch` in one reply. |
+| `wing_find` | Searches the profile for commands by words in their address (`talk`, `dyn thr`, `io in LCL g`), with type, range and whether each is writable. |
+| `wing_set` | Writes named parameters to one node. Validation is whole-message, so one bad key sends nothing. Every write is read back. A model change plus that model's parameters is staged: model first, then the rest against the new shape. `dry_run` shows every message without sending. |
+| `wing_dump` | Reads a subtree to a show file, child by child. Large walks continue in the background; anything the desk could not return is named in the file. Files default to `~/.wing-mcp/dumps/`. |
 | `wing_push_file` | Pushes a show file as a background job and returns a job id straight away. Retries the whole push up to three attempts. |
-| `wing_push_status` | Polls a push job: state, attempt, nodes done against total, elapsed seconds, failure, partial and incomplete counts, and the report file's path. |
-| `wing_generate_profile` | Re-walks your own desk and rebuilds the command profile. Read-only against the desk. |
+| `wing_push_status` / `wing_job_status` | Polls a background job (push, dump or profile walk): state, progress, counts, and the report or result. |
+| `wing_generate_profile` | Walks your desk in the background and builds its own profile. Read-only against the desk. |
 
-The shipped command profile was generated on firmware 3.1-0. Regenerate it with `wing_generate_profile` after any firmware change, so the types and ranges the server validates against match your desk.
+Excluded from the writable set and unreachable from any tool: card format, recording deletes, scene recall, transport, console-wide save, the desk's network settings (IP, mask, gateway, DHCP), the TCP lock and OSC read-only. A bad write to any of those would lock you out until someone fixes it at the surface.
 
-Fifteen destructive addresses are excluded from the writable set and unreachable from any tool: card format, recording deletes, scene recall, transport and console-wide save.
+## The GUI
+
+```
+python3 server/wing_gui.py          # opens http://127.0.0.1:8765
+python3 server/wing_gui.py --lan    # also reachable from an iPad on the same network
+```
+
+It uses only the standard library, so there's nothing extra to install. It has a console scanner, an address-tree browser with an editor for each node (changed values are highlighted and every write is confirmed by read-back), command search, dumps, dry runs and pushes with live progress, and profile builds. Every button calls the same functions Claude's tools do, so the checks are identical. It runs as its own process: don't start a push from it while Claude is pushing. `--lan` has no login; use it only on a network you trust.
 
 ## The Android companion app
 
@@ -55,6 +76,6 @@ The server never deletes from the console's library. A write is read back and co
 
 ## Tested on
 
-One desk, one platform: a WING Rack on firmware 3.1-0, driven from Windows. If you run it against a different WING, a different firmware or macOS, a first-time report on [Issues](https://github.com/dwrightii/wing-mcp/issues) is welcome.
+Hardware-tested: a WING Rack on firmware 3.1-0, driven from Windows. Version 0.4.0's full-size, Compact and macOS support is tested against a simulated desk and not yet on hardware; first reports are welcome. If you run it against a different WING, a different firmware or macOS, a first-time report on [Issues](https://github.com/dwrightii/wing-mcp/issues) is welcome.
 
 MIT licensed. Built by Doug Wright.

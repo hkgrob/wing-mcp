@@ -23,11 +23,16 @@ Live check: python wing_transport.py info
 """
 
 import ipaddress
+import re
+import shutil
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
+
+from wing_values import values_match
 
 OSC_PORT = 2223
 
@@ -230,10 +235,37 @@ def parse_ident(blob):
             "firmware": f[5] if len(f) > 5 else ""}
 
 
+def os_broadcasts():
+    """Broadcast addresses the OS reports for its own interfaces.
+
+    The /24 guess in list_consoles() is wrong on any larger subnet (a venue
+    /16, a /23 at a church campus). macOS and Linux print the real broadcast
+    address in `ifconfig`; on macOS a bare 255.255.255.255 also only leaves by
+    the default-route interface, so the per-interface address matters there
+    most. Windows has no ifconfig and falls back to the /24 guess."""
+    out = []
+    exe = shutil.which("ifconfig") or (
+        "/sbin/ifconfig" if sys.platform == "darwin" else None)
+    if not exe:
+        return out
+    try:
+        txt = subprocess.run([exe], capture_output=True, text=True,
+                             timeout=2).stdout
+    except Exception:
+        return out
+    for m in re.finditer(r"broadcast\s+(\d+\.\d+\.\d+\.\d+)", txt):
+        out.append(m.group(1))
+    return out
+
+
+class AmbiguousConsole(Exception):
+    """More than one desk answered with the same console name."""
+
+
 def list_consoles(timeout=0.8):
     """What the WING Edit / Wing Q / Mixing Station selector shows."""
     found = {}
-    targets = ["255.255.255.255"]
+    targets = ["255.255.255.255"] + os_broadcasts()
     for ip in local_ipv4s():
         try:
             targets.append(str(ipaddress.IPv4Network(ip + "/24", strict=False)
@@ -264,11 +296,19 @@ def list_consoles(timeout=0.8):
 
 def find_by_name(name, timeout=0.8):
     """Match on console NAME, never on address. A festival network with a
-    second WING on it makes an address match wrong rather than merely stale."""
-    for c in list_consoles(timeout):
-        if c.get("name") == name:
-            return c
-    return None
+    second WING on it makes an address match wrong rather than merely stale.
+
+    Two desks answering with the same name (two consoles both still on a
+    factory name, say) make a name match exactly as unsafe as an address
+    match, so that raises AmbiguousConsole rather than picking the first."""
+    hits = [c for c in list_consoles(timeout) if c.get("name") == name]
+    if len(hits) > 1:
+        raise AmbiguousConsole(
+            "%d desks answer to the name %r (%s). Rename one on its surface "
+            "before connecting." % (len(hits), name,
+                                    ", ".join("%s %s" % (c.get("ip"), c.get("model"))
+                                              for c in hits)))
+    return hits[0] if hits else None
 
 
 # ------------------------------------------------------------------- desk
@@ -405,7 +445,7 @@ class Desk:
                             "addr": addr}
         return None
 
-    def write_node(self, node, kv, expect_ack=True):
+    def write_node(self, node, kv, expect_ack=True, verify=False):
         """Write a node's parameters.
 
         Keys whose values are safe in the node payload go in ONE message, which
@@ -420,8 +460,15 @@ class Desk:
         not guaranteed to acknowledge and a silent mangle is the failure this
         whole function exists to prevent.
 
-        Raises WriteRejected if the node message goes unacknowledged, or if a
-        read-back shows a value did not land as written.
+        Raises WriteRejected if the node message goes unacknowledged, if the
+        desk answers anything but OK, or if a read-back shows a value did not
+        land as written.
+
+        verify=True reads the node back and compares every key even when no
+        leaf write was needed - wing_set uses it, because the desk's OK means
+        received, not stored. The pusher passes False and does its own
+        read-back. Comparison goes through wing_values.values_match, so the
+        desk's own rounding (fdr=0 reads back as 0.0) is not a failure.
 
         Locked for the length of the whole write-and-confirm exchange,
         including the leaf-write read-back, so nothing else on another
@@ -445,6 +492,9 @@ class Desk:
                         raise WriteRejected(
                             "no acknowledgement from %s for %s" % (node, batched))
                     result["ack"] = ack["ack"]
+                    if ack["ack"].strip().upper() != "OK":
+                        raise WriteRejected(
+                            "%s answered %r, not OK, for %s" % (node, ack["ack"], batched))
 
             for k, v in leafed.items():
                 self._flush()
@@ -452,20 +502,24 @@ class Desk:
                                  (self.host, OSC_PORT))
                 self._await_ack(time.time(), window=0.2)
 
-            if leafed:
+            if leafed or verify:
                 got = self.describe(node, with_values=True)
                 if got is None or got.get("overflow"):
                     raise WriteRejected(
-                        "%s could not be read back to confirm the leaf writes" % node)
-                wrong = {k: (str(v), got["params"].get(k, {}).get("value"))
-                         for k, v in kv.items()
-                         if got["params"].get(k, {}).get("value") != str(v)}
+                        "%s could not be read back to confirm the write" % node)
+                gp = got["params"]
+                wrong = {}
+                for k, v in kv.items():
+                    gv = gp.get(k, {}).get("value")
+                    if gv is None or not values_match(v, gv, gp.get(k, {}).get("type")):
+                        wrong[k] = (str(v), gv)
                 if wrong:
                     raise WriteRejected(
                         "%s did not land as written: %s" % (node, ", ".join(
                             "%s wanted %r got %r" % (k, w, g)
                             for k, (w, g) in sorted(wrong.items()))))
                 result["verified"] = sorted(kv)
+                result["landed"] = {k: gp.get(k, {}).get("value") for k in kv}
 
             result["ms"] = (time.time() - t0) * 1000.0
             return result

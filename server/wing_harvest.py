@@ -5,9 +5,9 @@ Same job as the wing_dump tool, run as a command instead. A full /ch walk is
 1,761 nodes and takes several minutes, which outlives an MCP tool call; this
 does not care how long it takes and prints progress while it works.
 
-    py wing_harvest.py BandA-Baseline
-    py wing_harvest.py BandB-Baseline --root /ch
-    py wing_harvest.py BandA-Baseline --root /bus --root /dca
+    python3 wing_harvest.py BandA-Baseline
+    python3 wing_harvest.py BandB-Baseline --root /ch
+    python3 wing_harvest.py BandA-Baseline --root /bus --root /dca
 
 With no --root it takes the whole post-show debrief set, DEBRIEF_ROOTS below.
 
@@ -39,12 +39,26 @@ DEBRIEF_ROOTS = ["/ch", "/aux", "/bus", "/main", "/mtx", "/dca",
                  "/fx", "/mgrp", "/cfg", "/io"]
 
 
-def harvest(desk, root, log, max_nodes=4000):
-    lines, queue, seen = [], [root], set()
-    overflow, noreply, novalues, read = [], [], [], 0
-    t0 = time.time()
+def walk_tree(desk, root, max_nodes=4000, progress=None):
+    """Breadth-first walk of a subtree, one query per node. Returns
+    (nodes, stats): nodes is a list of (address, got, values_known) in visit
+    order, where got is Desk.describe()'s dict.
 
-    while queue and read < max_nodes:
+    Shared by the harvest CLI, the wing_dump tool and the profile walk in
+    wing_generate_profile, so all three survive an overflow the same way.
+
+    The desk refuses a reply it cannot fit and returns an error in its
+    place. That error carries no child list, and the child list is the only
+    way this walk knows where to go next - so taking the overflow at face
+    value loses every node BELOW this one and still exits clean, which is
+    indistinguishable from a full walk. Names only drops the value column
+    and fits where the full answer did not, so the walk continues past it.
+    That node's own values are the only thing lost, and they are recorded
+    as lost (stats["no_values"])."""
+    out, queue, seen = [], [root], set()
+    overflow, noreply, novalues = [], [], []
+    t0 = time.time()
+    while queue and len(out) < max_nodes:
         node = queue.pop(0)
         if node in seen:
             continue
@@ -53,34 +67,61 @@ def harvest(desk, root, log, max_nodes=4000):
         if got is None:
             noreply.append(node)
             continue
+        values_known = True
         if got.get("overflow"):
-            # The desk refuses a reply it cannot fit and returns an error in
-            # its place. That error carries no child list, and the child list
-            # is the only way this walk knows where to go next - so taking the
-            # overflow at face value loses every node BELOW this one and still
-            # exits clean, which is indistinguishable from a full harvest.
-            # Names only drops the value column and fits where the full answer
-            # did not, so the walk continues past it. This node's own values
-            # are the only thing lost, and they are recorded as lost.
             got = desk.describe(node, with_values=False)
             if got is None or got.get("overflow"):
                 overflow.append(node)
                 continue
             novalues.append(node)
-        read += 1
+            values_known = False
+        out.append((node, got, values_known))
         base = "" if node == "/" else node
         for c in got["children"]:
             queue.append(base + "/" + c)
+        if progress:
+            progress(len(out), len(queue))
+    return out, {"nodes": len(out), "overflow": overflow, "no_reply": noreply,
+                 "no_values": novalues, "unread": len(queue),
+                 "seconds": round(time.time() - t0, 1)}
+
+
+def show_lines(walked):
+    """Show-file lines for a walk: writable, non-null values only."""
+    lines = []
+    for node, got, values_known in walked:
+        if not values_known:
+            continue
         kv = {k: v["value"] for k, v in got["params"].items()
               if not v["readonly"] and v["value"] is not None}
         if kv:
             lines.append("%s\t%s" % (node, wt.encode_kv_file(kv)))
-        if read % 100 == 0:
-            log("    %4d nodes, %4d queued, %.0fs" % (read, len(queue), time.time() - t0))
+    return lines
 
-    return lines, {"nodes": read, "lines": len(lines), "overflow": overflow,
-                   "no_reply": noreply, "no_values": novalues,
-                   "unread": len(queue), "seconds": round(time.time() - t0, 1)}
+
+def loss_header(stats):
+    """Comment lines naming everything a dump does NOT contain. A dump that
+    lost a subtree otherwise looks exactly like a full one."""
+    header = []
+    for label, nodes in (("values not captured, names only", stats["no_values"]),
+                         ("SUBTREE LOST, overflow at", stats["overflow"]),
+                         ("no reply from", stats["no_reply"])):
+        if nodes:
+            header.append("# %s: %s" % (label, ", ".join(nodes)))
+    if stats["unread"]:
+        header.append("# INCOMPLETE: node cap reached, %d node(s) never "
+                      "visited" % stats["unread"])
+    return header
+
+
+def harvest(desk, root, log, max_nodes=4000):
+    def progress(read, queued):
+        if read % 100 == 0:
+            log("    %4d nodes, %4d queued" % (read, queued))
+    walked, stats = walk_tree(desk, root, max_nodes, progress)
+    lines = show_lines(walked)
+    stats["lines"] = len(lines)
+    return lines, stats
 
 
 def main():
@@ -90,7 +131,8 @@ def main():
                     help="subtree to harvest; repeatable. Default is the "
                          "post-show debrief set: " + " ".join(DEBRIEF_ROOTS))
     ap.add_argument("--host")
-    ap.add_argument("--console", default="MyWing")
+    ap.add_argument("--console", default=os.environ.get("WING_CONSOLE"),
+                    help="console name to match (default: $WING_CONSOLE)")
     a = ap.parse_args()
     roots = a.root or DEBRIEF_ROOTS
 
@@ -100,7 +142,16 @@ def main():
     host = a.host
     ident = {}
     if not host:
-        found = wt.find_by_name(a.console)
+        if not a.console:
+            seen = [c.get("name") for c in wt.list_consoles()]
+            print("Name the desk with --console or $WING_CONSOLE. Answering: %s"
+                  % (", ".join(seen) or "none"))
+            return 1
+        try:
+            found = wt.find_by_name(a.console)
+        except wt.AmbiguousConsole as e:
+            print(e)
+            return 1
         if not found:
             print("No console named %r answered." % a.console)
             return 1
@@ -131,17 +182,8 @@ def main():
             "# root %s, %d nodes read, %d lines" % (root, stats["nodes"], stats["lines"]),
             "# Pairs are TAB separated: a value may contain a comma.",
         ]
-        # Anything this file does NOT contain says so inside the file. A
-        # harvest that lost a subtree otherwise looks exactly like a full one.
-        for label, nodes in (("values not captured, names only",
-                              stats["no_values"]),
-                             ("SUBTREE LOST, overflow at", stats["overflow"]),
-                             ("no reply from", stats["no_reply"])):
-            if nodes:
-                header.append("# %s: %s" % (label, ", ".join(nodes)))
-        if stats["unread"]:
-            header.append("# INCOMPLETE: node cap reached, %d node(s) never "
-                          "visited" % stats["unread"])
+        # Anything this file does NOT contain says so inside the file.
+        header += loss_header(stats)
         header.append("")
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(header + lines) + "\n")

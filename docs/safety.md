@@ -6,7 +6,7 @@ Five rules this server keeps. They are here so that a fork keeps them too. Four 
 
 Enforcement is omission from the tool surface, not a caution in a docstring. A rule that lives in prose is a rule a model can talk itself past; a tool that does not exist cannot be called. The WING's OSC surface carries no library save at all, so this server also cannot overwrite or remove a stored show, scene, preset or snippet.
 
-Fifteen destructive addresses are excluded from the writable set for the same reason: card format, recording session and marker deletes, scene recall, transport and console-wide save. Nothing on this surface reaches them.
+The destructive and lock-out addresses are excluded from the writable set for the same reason: card format, recording session and marker deletes, scene recall, transport and console-wide save. Nothing on this surface reaches them.
 
 ## Never overwrite an occupied library slot
 

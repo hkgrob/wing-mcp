@@ -5,10 +5,10 @@ Same reason as the read side: a full scene is 2,637 nodes and outlives an
 MCP tool call, so this runs as a command instead and prints progress while
 it works.
 
-    py wing_push.py ../outputs/BandA_Show_v1.wing --dry-run
-    py wing_push.py ../outputs/BandA_Show_v1.wing
-    py wing_push.py ../outputs/BandA_Show_v1.wing --only /ch/1 --limit 5 --dry-run
-    py wing_push.py ../outputs/BandA_Show_v1.wing --host 192.0.2.10
+    python3 wing_push.py ../outputs/BandA_Show_v1.wing --dry-run
+    python3 wing_push.py ../outputs/BandA_Show_v1.wing
+    python3 wing_push.py ../outputs/BandA_Show_v1.wing --only /ch/1 --limit 5 --dry-run
+    python3 wing_push.py ../outputs/BandA_Show_v1.wing --host 192.0.2.10
 
 This is now a thin command-line wrapper over wing_push_core.py, which also
 backs the wing_push_file / wing_push_status MCP tools in server.py (see
@@ -72,8 +72,9 @@ def main():
                                       "wing_harvest.py or a template generator")
     ap.add_argument("--dry-run", action="store_true",
                     help="resolve every write against the live desk but send nothing")
-    ap.add_argument("--console", default="MyWing",
-                    help="match the console by name, never by address")
+    ap.add_argument("--console", default=os.environ.get("WING_CONSOLE"),
+                    help="match the console by name, never by address "
+                         "(default: $WING_CONSOLE)")
     ap.add_argument("--host", help="skip discovery and talk to this IP directly")
     ap.add_argument("--limit", type=int, default=None,
                     help="process at most this many node lines (after --only)")
@@ -88,14 +89,27 @@ def main():
     host = a.host
     ident = {}
     if not host:
-        found = wt.find_by_name(a.console)
+        if not a.console:
+            seen = [c.get("name") for c in wt.list_consoles()]
+            log("Name the desk with --console or $WING_CONSOLE. Answering: %s"
+                % (", ".join(seen) or "none"))
+            return 1
+        try:
+            found = wt.find_by_name(a.console)
+        except wt.AmbiguousConsole as e:
+            log(str(e))
+            return 1
         if not found:
             log("No console named %r answered." % a.console)
             return 1
         host, ident = found["ip"], found
     log("desk %s  %s  fw %s" % (host, ident.get("name", ""), ident.get("firmware", "?")))
 
-    profile = wp.Profile()
+    profile = wp.Profile.for_model(ident.get("model"))
+    if ident.get("model") and not profile.model_matches(ident["model"]):
+        log("WARNING: no profile for model %r; validating against the %r profile "
+            "(%s). Run wing_generate_profile on this desk." %
+            (ident["model"], profile.model, profile.path))
     counts_p = profile.d["counts"]
     log("profile firmware %s  (%d nodes, %d writable, %d excluded)" % (
         profile.firmware, len(profile.nodes), counts_p["writable"], counts_p["excluded"]))

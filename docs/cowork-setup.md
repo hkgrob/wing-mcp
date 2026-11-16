@@ -6,7 +6,7 @@ For installing Claude Desktop and connecting a folder, see Anthropic's documenta
 
 ## The working shape
 
-Install the bundle first. Download `wing-rack-mcp-v0.3.1.mcpb` from Releases and install it in Claude Desktop, under Settings, then Connectors, then install from file. The README's five steps get you to a value coming back off channel 1; do that before anything here.
+Install the bundle first. Download `wing-mcp-v0.4.0.mcpb` from Releases and install it in Claude Desktop: double-click the file, or go to Settings, then Extensions, then Advanced settings, then Install Extension. The README's five steps get you to a value coming back off channel 1; do that before anything here.
 
 Then connect a working folder and make one project folder inside it for the desk. That folder holds four things.
 
