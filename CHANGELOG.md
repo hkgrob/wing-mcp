@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.6.0 - 2026-11-17
+
+New:
+- **Model catalog** (`wing_models`, and `wing_find` now searches it): every EQ, gate, dynamics, filter and FX model's controls, including models not loaded anywhere on the desk. Dry runs predict a model change from it when no other node is on that model. Derived from libwing (Apache-2.0); see `server/THIRD_PARTY_NOTICES.md`. Reference only - the desk validates every write.
+- **Fades** (`wing_fade`, `wing_fade_status`, `wing_fade_stop`): timed moves of faders, sends or any level, absolute or relative, linear-in-dB or S-curve, several targets at once, in the background.
+- **Live change feed** (`wing_watch`, `wing_changes`): every change on the desk with where it came from - this server ("self") or the surface/other apps ("external"). Off until asked for, because the desk allows one event subscription at a time.
+- **Presets** (`wing_preset_save`, `wing_preset_list`, `wing_preset_load`): save part of the desk by name and recall it, optionally retargeted onto other channels - which copies or moves strips.
+- **Auto-gate** and **auto-compress** (`wing_auto_gate`, `wing_auto_compress`): thresholds from measured noise floor, playing level and the model's ratio; suggest by default.
+- **Scene control** (`wing_scene_status`, `wing_scene`): GO / NEXT / PREV / GOTAG on the open show. Recall is off unless `~/.wing-mcp/config.json` has `{"scene_control": true}`.
+- GUI: a Live tab with fades, the change feed, presets and scene status.
+
+Fixed:
+- The pusher never writes a channel's `$g`/`$vph` (mirrors of its source's preamp and phantom): written through a channel they hit whatever source the channel pointed at in that moment, which is the wrong one when the same file re-routes it. Each strip's `in/conn` is also processed before its `in/set`.
+- Values longer than the desk's 16-character reply column (channel tags in several groups, scene names) were cut short on read, so a dump-then-push could truncate tags. The parser now locates each row's type by its shape, and a string filling the column is re-read on its own address.
+
+## 0.5.3 - 2026-11-17
+
+- `wing_gain_check` uses preamp and channel trim together: the preamp takes coarse moves (0.5 dB steps), the trim smooths in 0.1 dB steps. A correction under `fine_db` (3 dB) goes to the trim alone; the trim is held within ±`trim_limit_db` (6 dB), beyond which the preamp moves. The trim is per channel, so fine moves never touch other channels or direct outs sharing the input.
+
+## 0.5.2 - 2026-11-17
+
+- `wing_gain_check` loops by itself until every channel with signal is inside target ± tolerance (default −13 ± 1 dBFS), up to `max_passes`. It stops once in range instead of chasing the exact target, and halves a correction that reverses direction, so programme material doesn't ping-pong the gain. One call, one approval.
+- New `wing_set_many`: a batch of writes validated together and sent in one call.
+- Fixed: numeric ranges were not checked, so an out-of-range value (EQ gain −50 dB) passed validation. Now rejected before anything is sent.
+- Fixed: values with a leading plus sign (`+0.1`, `+7.0`), which the desk itself writes in dumps, were rejected as not numbers, so a pushed dump silently skipped them.
+
+## 0.5.1 - 2026-11-17
+
+- Tools are annotated read-only or write, so Claude's permission settings can approve each group once.
+- `wing_gain_check` uses the channel trim when a source has no preamp (aux line inputs, USB, modules), moves the fader the opposite way so the room level holds, steps up to 6 dB per run, and reports `converged`.
+- `wing_meters` returns one short row per strip and lists silent strips separately; `detail=true` for every meter.
+- `wing_rta` explains that stand-out bands on music are usually notes, not resonances.
+
+## 0.5.0 - 2026-11-17
+
+- New `wing_meters`: live input/output levels and gate/compressor gain reduction per strip, from the WING native meter stream (TCP 2222 out, UDP back).
+- New `wing_rta`: the desk's 120-band RTA on any strip, pre- or post-EQ, with stand-out resonances; restores the RTA setting afterwards.
+- New `wing_gain_check`: measures input peaks at soundcheck and suggests preamp gain, or applies it capped per step.
+- GUI: Meters tab with levels, RTA graph and gain check.
+- The full-size WING on firmware 3.1.2 reports `wing-fullsize`; it is now named as such.
+
 ## 0.4.0 - 2026-11-16
 
 Full-size WING, Compact and macOS support, a web GUI, and fixes to the write path.

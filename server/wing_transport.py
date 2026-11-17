@@ -38,6 +38,7 @@ OSC_PORT = 2223
 
 # Column offsets of the desk's reply table.
 NAME_COL, VAL_COL, FLAG_COL, TYPE_COL = 2, 17, 33, 37
+VAL_WIDTH = FLAG_COL - VAL_COL - 1
 
 # Reply drain window: how long Desk.ask() keeps listening after the first
 # reply packet for a second one before deciding the reply is complete.
@@ -129,6 +130,27 @@ def decode(buf):
         return "<decode failed: %s>" % e, [repr(buf[:200])]
 
 
+_TYPE_AT = re.compile(r"(r/o\s+)?\b(int|lin|log|fader|list|string)\s*\[")
+
+
+def _split_value_row(raw):
+    """(value, readonly, type) for one parameter row of a '#' reply.
+
+    The value column is nominally [17:33], but a value longer than 16
+    characters (channel tags like '#M1,#D2,#D3,#D4', scene names) pushes
+    the r/o flag and type to the right, and fixed slicing would cut the
+    value and garble the type. So the type is found by its own shape -
+    the first 'int [', 'lin [', 'log [', 'fader [', 'list [' or
+    'string [' at or after the flag column - and the value is everything
+    before it."""
+    for m in _TYPE_AT.finditer(raw, FLAG_COL if len(raw) > FLAG_COL else 0):
+        value = raw[VAL_COL:m.start()].strip()
+        return value, bool(m.group(1)), raw[m.start(2):].strip()
+    return (raw[VAL_COL:FLAG_COL].strip() if len(raw) > VAL_COL else "",
+            (raw[FLAG_COL:TYPE_COL].strip() if len(raw) > FLAG_COL else "") == "r/o",
+            raw[TYPE_COL:].strip() if len(raw) > TYPE_COL else "")
+
+
 def parse_node(payload, with_values):
     """Returns (children, params). params maps name -> dict with value,
     readonly and type. value is None when with_values is False."""
@@ -144,11 +166,8 @@ def parse_node(payload, with_values):
             children.append(name)
             continue
         if with_values:
-            params[name] = {
-                "value": raw[VAL_COL:FLAG_COL].strip() if len(raw) > VAL_COL else "",
-                "readonly": (raw[FLAG_COL:TYPE_COL].strip() if len(raw) > FLAG_COL else "") == "r/o",
-                "type": raw[TYPE_COL:].strip() if len(raw) > TYPE_COL else "",
-            }
+            value, ro, typ = _split_value_row(raw)
+            params[name] = {"value": value, "readonly": ro, "type": typ}
         else:
             params[name] = {"value": None,
                             "readonly": name.startswith("$"),
@@ -331,6 +350,9 @@ class Desk:
         # write_node() call that already holds the lock, on the same thread -
         # a plain Lock would deadlock on that reentry.
         self._lock = threading.RLock()
+        # Called with (node, kv) for every write sent - the change feed uses
+        # it to tell this server's own writes from changes made elsewhere.
+        self.write_hooks = []
 
     def close(self):
         try:
@@ -428,8 +450,26 @@ class Desk:
         if "OVERFLOW" in raw.upper():
             return {"overflow": True, "children": [], "params": {}}
         children, params = parse_node(raw, with_values)
+        if with_values:
+            # A string that fills the whole value column may have been cut
+            # by the desk; read that one parameter on its own to be sure.
+            for k, p in params.items():
+                if p["type"].startswith("string") and len(p["value"]) >= VAL_WIDTH:
+                    full = self.get_leaf("%s/%s" % ("" if node == "/" else node, k))
+                    if full is not None:
+                        p["value"] = full
         return {"overflow": False, "children": children, "params": params,
                 "raw": raw}
+
+    def get_leaf(self, addr):
+        """One parameter's value, read on its own address (the reply's
+        first string argument)."""
+        _, replies = self.ask(addr)
+        for _a, args in replies:
+            for x in args:
+                if isinstance(x, str):
+                    return x
+        return None
 
     def _await_ack(self, t0, window=None):
         deadline = time.time() + (window if window is not None else self.timeout)
@@ -476,6 +516,11 @@ class Desk:
         The leaf-write branch below calls self.describe(), which re-enters
         self.ask() and therefore this lock on the same thread - see the
         RLock note on __init__."""
+        for hook in self.write_hooks:
+            try:
+                hook(node, kv)
+            except Exception:
+                pass
         with self._lock:
             batched = {k: v for k, v in kv.items() if not needs_leaf_write(v)}
             leafed = {k: v for k, v in kv.items() if needs_leaf_write(v)}
@@ -546,6 +591,11 @@ REAL_HASH = (
     "  ptap           5                   list [IN, FILT, 3, 4, 5, PFL, AFL, POST]\n"
     "  tags           #M1                 string [80]\n"
 )
+LONG_HASH = (
+    "  tags           #M1,#D2,#D3,#D4,#D5     string [80]\n"
+    "  $active        I:/HILLSIDE/scene_1 r/o string [256]\n"
+    "  fdr            -3.0                fader [-oo .. 10.0 dB], 1024 steps\n"
+)
 REAL_QUERY = (
     "  consolename    string [16]\n"
     "  ipmode         list [DHCP, STATIC]\n"
@@ -579,6 +629,14 @@ def selftest():
     check("fdr value", p["fdr"]["value"], "2.9")
     check("list type intact", p["ptap"]["type"], "list [IN, FILT, 3, 4, 5, PFL, AFL, POST]")
     check("tags with # in value", p["tags"]["value"], "#M1")
+
+    print("node table, values longer than the column:")
+    _, pl = parse_node(LONG_HASH, True)
+    check("long tags intact", pl["tags"]["value"], "#M1,#D2,#D3,#D4,#D5")
+    check("long tags type", pl["tags"]["type"], "string [80]")
+    check("long r/o value", (pl["$active"]["value"], pl["$active"]["readonly"]),
+          ("I:/HILLSIDE/scene_1", True))
+    check("normal row unaffected", pl["fdr"]["value"], "-3.0")
 
     print("node table, query form:")
     kids2, p2 = parse_node(REAL_QUERY, False)

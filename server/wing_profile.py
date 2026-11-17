@@ -46,12 +46,13 @@ BUNDLED_PROFILES = os.path.join(HERE, "profiles")
 
 # What discovery's model field and /$syscfg/$cnsmdl report for each desk,
 # per Patrick-Gilles Maillot's "WING Remote Protocols" (V 3.1.2-a): the
-# full-size desk is "ngc-full" (or "wing-bk"), not "wing". Hardware differs
+# full-size desk is "ngc-full" (or "wing-bk"), not "wing"; a full-size desk on firmware 3.1.2 reports "wing-fullsize" in discovery (seen 2026-11-17). Hardware differs
 # where it shows: the full desk has 8 local Midas preamps against 24 on the
 # Rack and Compact, 2x2 GPIO against 1x2 on the Compact, and the Compact has
 # its own layer/user-control nodes. Unknown strings still work - they just
 # display as themselves.
 MODEL_NAMES = {
+    "wing-fullsize": "WING (full size)",
     "ngc-full": "WING (full size)",
     "wing-bk": "WING (full size, black)",
     "wing": "WING (full size)",
@@ -188,7 +189,7 @@ def parse_type(t):
 # parameter is legal for that parameter by construction, so the checker accepts
 # the desk's notation rather than demanding a plain decimal. Rejecting 14k78 was
 # the checker being wrong about the desk, not the desk being wrong.
-_NUMBER = re.compile(r"^-?(\d+(\.\d+)?|\d+k\d+|-oo)$")
+_NUMBER = re.compile(r"^[-+]?(\d+(\.\d+)?|\d+k\d+|-oo)$")
 
 
 def validate(spec, value):
@@ -210,7 +211,32 @@ def validate(spec, value):
     elif k == "number":
         if v != "-oo" and not _NUMBER.match(v):
             return "expected a number, the desk's k notation, or -oo"
+        bounds = _number_bounds(spec.get("raw", ""))
+        if bounds and v != "-oo":
+            from wing_values import _to_number
+            x = _to_number(v)
+            lo, hi = bounds
+            if x is not None and not (lo - 1e-6 <= x <= hi + 1e-6):
+                return "out of range %s" % _RANGE_TEXT.search(spec["raw"]).group(1)
     return None
+
+
+_RANGE_TEXT = re.compile(r"\[(.*?)\]")
+
+
+def _number_bounds(raw):
+    """(lo, hi) from 'lin [-15.0 .. +15.0 dB], 301 steps', 'log [20.0 ..
+    20k00 Hz]' or 'fader [-oo .. 10.0 dB]' (-oo as -inf). None when the
+    range can't be read, so validation stays permissive rather than wrong."""
+    m = _RANGE_TEXT.search(raw or "")
+    if not m or ".." not in m.group(1):
+        return None
+    from wing_values import _parse_bound  # noqa: F401  (lazy: avoid cycles)
+    a, b = [x.strip() for x in m.group(1).split("..", 1)]
+    lo, hi = _parse_bound(a), _parse_bound(b)
+    if lo is None or hi is None:
+        return None
+    return lo, hi
 
 
 # ----------------------------------------------------------------- building

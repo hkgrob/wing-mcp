@@ -94,6 +94,8 @@ label.ck input{width:auto}
       <button data-p="find">Find</button>
       <button data-p="dump">Dump</button>
       <button data-p="push">Push</button>
+      <button data-p="meters">Meters</button>
+      <button data-p="live">Live</button>
       <button data-p="profile">Profile</button>
       <button data-p="log">Log</button>
     </nav>
@@ -126,6 +128,29 @@ label.ck input{width:auto}
         <div class="row"><input id="pushPath" placeholder="/full/path/to/show.wing"></div>
         <div class="row" style="margin-top:10px"><button id="pushDry">Dry run</button><button class="primary" id="pushLive">Push to desk</button></div></div>
       <div id="pushOut"></div>
+    </div>
+    <div class="pane" id="p-meters">
+      <div class="card"><p>Live levels from the desk's meter stream. Read-only.</p>
+        <div class="row"><input id="mStrips" value="ch:1-24"><input id="mSecs" value="2" style="max-width:70px"><button class="primary" id="mBtn">Read meters</button></div></div>
+      <div id="mOut"></div>
+      <div class="card"><p>RTA on one strip. PREEQ shows the raw source; POSTEQ shows what the EQ makes of it.</p>
+        <div class="row"><input id="rSrc" value="ch:1"><select id="rTap"><option>PREEQ</option><option>POSTEQ</option><option>IN</option><option>PREFDR</option><option>POST</option></select><button class="primary" id="rBtn">Analyse</button></div></div>
+      <div id="rOut"></div>
+      <div class="card"><p>Gain check: play each source, then measure. Suggestions only; nothing is written. (Ask Claude to apply: it loops until in range.)</p>
+        <div class="row"><input id="gCh" value="ch:1-24"><input id="gTgt" value="-12" style="max-width:70px" title="target peak dBFS"><button class="primary" id="gBtn">Measure 6 s</button></div></div>
+      <div id="gOut"></div>
+    </div>
+    <div class="pane" id="p-live">
+      <div class="card"><p><b>Fade</b> - targets like <code>ch:9</code>, <code>ch:1-4</code>, <code>bus:3</code>, or <code>/ch/9/send/3</code>.</p>
+        <div class="row"><input id="fT" value="ch:9"><input id="fTo" placeholder="to dB or -oo" style="max-width:120px"><input id="fBy" placeholder="or by dB" style="max-width:110px"><input id="fS" value="3" style="max-width:60px" title="seconds"><select id="fC" style="max-width:90px"><option>linear</option><option>s</option></select><button class="primary" id="fGo">Fade</button><button id="fStop">Stop all</button></div>
+        <div id="fOut"></div></div>
+      <div class="card"><p><b>Change feed</b> - every change on the desk, and who made it. Takes the WING's single event subscription (Companion feedback stops while it's on).</p>
+        <div class="row"><button id="wOn">Watch</button><button id="wOff">Stop</button><label class="ck"><input type="checkbox" id="wExt"> others only</label><input id="wPre" placeholder="prefix, e.g. /ch" style="max-width:160px"></div>
+        <div id="wOut"></div></div>
+      <div class="card"><p><b>Presets</b> - parts of the desk saved to your computer.</p>
+        <div class="row"><input id="pName" placeholder="name"><input id="pRoots" placeholder="/ch/11, /bus/3"><button id="pSave">Save</button><button id="pList">Refresh</button></div>
+        <div id="pOut"></div></div>
+      <div class="card"><p><b>Scene</b></p><div class="row"><button id="sStat">Show status</button></div><div id="sOut"></div></div>
     </div>
     <div class="pane" id="p-profile">
       <div class="card"><p>The command profile is the desk's own list of every parameter, type and range, and every write is checked against it. Build one on any desk whose model has none yet (a full WING or a Compact), and again after a firmware update. Read-only; takes several minutes.</p>
@@ -369,6 +394,58 @@ $("#profBtn").onclick = async () => {
     refreshStatus();
   });
 };
+
+// ---------- meters
+const bar = (db, lo = -60) => { const w = Math.max(0, Math.min(100, (db - lo) / -lo * 100)); const c = db > -3 ? "var(--bad)" : db > -12 ? "var(--warn)" : "var(--ok)"; return `<div class="prog" style="margin:0;width:160px;display:inline-block;vertical-align:middle"><div style="width:${w}%;background:${c}"></div></div> ${db}`; };
+$("#mBtn").onclick = async () => {
+  $("#mOut").innerHTML = '<p class="dim">Listening…</p>';
+  const r = await call("wing_meters", {strips: $("#mStrips").value.split(/\s+/).filter(Boolean), seconds: +$("#mSecs").value || 2});
+  if (!r.ok) { msg($("#mOut"), {ok: false, error: r.error || r.hint || "No meter data"}); return; }
+  $("#mOut").innerHTML = `<table><thead><tr><th>Strip</th><th>Input peak</th><th>Output peak</th><th>Gate GR</th><th>Comp GR</th></tr></thead><tbody>${Object.entries(r.meters).map(([k, m]) => `<tr><td class="k">${esc(k)}</td><td>${bar(m.input_peak_db)}</td><td>${bar(m.output_peak_db)}</td><td>${m.gate_reduction_db ? m.gate_reduction_db.max : ""}</td><td>${m.dyn_reduction_db ? m.dyn_reduction_db.max : ""}</td></tr>`).join("")}</tbody></table>`;
+};
+$("#rBtn").onclick = async () => {
+  $("#rOut").innerHTML = '<p class="dim">Analysing…</p>';
+  const r = await call("wing_rta", {source: $("#rSrc").value.trim(), tap: $("#rTap").value, seconds: 3});
+  if (!r.ok) { msg($("#rOut"), {ok: false, error: r.error || r.hint || "No RTA data"}); return; }
+  const b = r.third_octave, lo = Math.min(...b.map(x => x.db)), hi = Math.max(...b.map(x => x.db));
+  $("#rOut").innerHTML = `<div class="card" style="max-width:none"><div style="display:flex;align-items:flex-end;gap:2px;height:160px">${b.map(x => `<div title="${x.hz} Hz ${x.db} dB" style="flex:1;background:var(--acc);height:${5 + 95 * (x.db - lo) / ((hi - lo) || 1)}%"></div>`).join("")}</div><div style="display:flex;justify-content:space-between" class="dim"><span>${b[0].hz} Hz</span><span>1 kHz</span><span>${b[b.length - 1].hz} Hz</span></div><p style="margin-top:10px">Stand-out bands: ${r.resonances.map(p => `${p.hz} Hz (+${p.above_local_db} dB)`).join(", ") || "none"}</p></div>`;
+};
+$("#gBtn").onclick = async () => {
+  $("#gOut").innerHTML = '<p class="dim">Measuring for 8 seconds - play now…</p>';
+  const r = await call("wing_gain_check", {channels: $("#gCh").value.trim(), target_peak_db: +$("#gTgt").value || -12});
+  if (!r.ok) { msg($("#gOut"), {ok: false, error: r.error || r.hint || "No meter data"}); return; }
+  $("#gOut").innerHTML = `<table><thead><tr><th>Ch</th><th>Source</th><th>Peak</th><th>Preamp</th><th>Action</th></tr></thead><tbody>${r.channels.map(c => `<tr><td>${c.channel}</td><td>${esc(c.name || c.source)}</td><td>${c.input_peak_db ?? ""}</td><td>${c.gain_db ?? ""} (${esc(c.control || "")})</td><td>${esc(c.result)}</td></tr>`).join("")}</tbody></table>`;
+};
+
+// ---------- live
+$("#fGo").onclick = async () => {
+  const a = {targets: $("#fT").value.trim(), seconds: +$("#fS").value || 3, curve: $("#fC").value};
+  if ($("#fTo").value.trim()) a.to_db = $("#fTo").value.trim() === "-oo" ? "-oo" : +$("#fTo").value; else a.by_db = +$("#fBy").value;
+  const r = await call("wing_fade", a);
+  msg($("#fOut"), r, r.ok ? r.targets.map(t => `${t.node}/${t.param}: ${t.from} → ${t.to} over ${r.seconds}s`).join("\n") : "");
+};
+$("#fStop").onclick = async () => msg($("#fOut"), await call("wing_fade_stop"), "Stopped.");
+let wTimer = null;
+async function pollChanges() {
+  const r = await fetch("/api/wing_changes", {method: "POST", body: JSON.stringify({seconds: 600, external_only: $("#wExt").checked, prefix: $("#wPre").value.trim() || null, limit: 60})}).then(x => x.json());
+  if (!r.ok) { $("#wOut").innerHTML = `<div class="msg bad">${esc(r.error)}</div>`; return; }
+  $("#wOut").innerHTML = `<p class="dim">${r.events_buffered} events · listening ${r.listening_for_s}s</p><table><thead><tr><th>Address</th><th>From → to</th><th>Moves</th><th>Who</th><th>Ago</th></tr></thead><tbody>${r.changes.map(c => `<tr><td class="k">${esc(c.address)}</td><td>${esc(c.from)} → ${esc(c.to)}</td><td>${c.count}</td><td>${esc(c.origin)}</td><td>${c.seconds_ago}s</td></tr>`).join("")}</tbody></table>`;
+}
+$("#wOn").onclick = async () => { const r = await call("wing_watch", {on: true}); if (!r.ok) return msg($("#wOut"), r); clearInterval(wTimer); wTimer = setInterval(pollChanges, 1500); pollChanges(); };
+$("#wOff").onclick = async () => { clearInterval(wTimer); msg($("#wOut"), await call("wing_watch", {on: false}), "Feed off."); };
+async function listPresets() {
+  const r = await call("wing_preset_list");
+  $("#pOut").innerHTML = r.presets.length ? `<table><tbody>${r.presets.map(p => `<tr><td class="k">${esc(p.name)}</td><td class="dim">${esc(p.roots)} · ${esc(p.saved)}</td><td><button data-dry="${esc(p.name)}">Dry run</button> <button data-load="${esc(p.name)}" class="primary">Load</button></td></tr>`).join("")}</tbody></table>` : '<p class="dim">No presets yet.</p>';
+  $("#pOut").querySelectorAll("[data-load],[data-dry]").forEach(b => b.onclick = async () => {
+    const name = b.dataset.load || b.dataset.dry, dry = !!b.dataset.dry;
+    if (!dry && !confirm("Load preset " + name + " onto the live desk?")) return;
+    followJob(await call("wing_preset_load", {name, dry_run: dry}), $("#pOut"), (dry ? "Dry run " : "Load ") + name, (r, el) => {
+      el.innerHTML = `<div class="msg ${r.state === "done" ? "ok" : "bad"}">${esc(`${r.state} · ${r.nodes_done}/${r.nodes_total} · failed ${r.failed_count}\nReport: ${r.report_path}`)}</div>`; });
+  });
+}
+$("#pList").onclick = listPresets;
+$("#pSave").onclick = async () => { const r = await call("wing_preset_save", {name: $("#pName").value.trim(), roots: $("#pRoots").value.split(",").map(x => x.trim()).filter(Boolean)}); msg($("#pOut"), r, r.ok ? `Saved ${r.lines} lines → ${r.path}` : ""); if (r.ok) setTimeout(listPresets, 400); };
+$("#sStat").onclick = async () => { const r = await call("wing_scene_status"); msg($("#sOut"), r, r.ok ? `Show: ${r.actshow}\nActive: ${r.active}\nScenes: ${(r.scenes || []).join(", ")}\nScene control from Claude: ${r.scene_control_enabled ? "enabled" : "off"}` : ""); };
 
 refreshStatus().then(v => { if (v.connected_to) loadTree(); });
 </script>

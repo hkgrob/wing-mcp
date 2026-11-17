@@ -1,9 +1,9 @@
 {
   "manifest_version": "0.3",
   "name": "wing-rack-mcp",
-  "display_name": "WING (v0.4.0)",
-  "version": "0.4.0",
-  "description": "Controls a Behringer WING - full size, Compact or Rack - over OSC on the LAN. No credentials: the desk is unauthenticated UDP. The command profile is generated off the hardware and chosen by the model the desk reports (ngc-full, wing-compact, wing-rack); the bundle ships the Rack's and wing_generate_profile builds one for any other desk. Destructive, transport, scene-recall and network-identity addresses are excluded from the writable set and unreachable from any tool. Every write is read back and compared. Pushes, dumps and profile walks run as background jobs polled with wing_job_status.",
+  "display_name": "WING (v0.6.0)",
+  "version": "0.6.0",
+  "description": "Controls a Behringer WING - full size, Compact or Rack - over OSC on the LAN. No credentials: the desk is unauthenticated UDP. The command profile is generated off the hardware and chosen by the model the desk reports (ngc-full, wing-compact, wing-rack); the bundle ships the Rack's and wing_generate_profile builds one for any other desk. Destructive, transport, scene-recall and network-identity addresses are excluded from the writable set and unreachable from any tool. Every write is read back and compared. Pushes, dumps and profile walks run as background jobs polled with wing_job_status. Includes live meters, RTA, gain staging, fades, a live change feed, presets, auto-gate/compress and opt-in scene control. Model catalog derived from libwing (Apache-2.0).",
   "author": {
     "name": "Doug Wright"
   },
@@ -51,6 +51,10 @@
       "description": "Write named parameters to one node. Whole-message validation, read-back after every write, staged model changes."
     },
     {
+      "name": "wing_set_many",
+      "description": "Several validated writes in one call; nothing is sent if any fails validation."
+    },
+    {
       "name": "wing_dump",
       "description": "Read a subtree to a show file; large walks continue in the background."
     },
@@ -69,6 +73,70 @@
     {
       "name": "wing_job_status",
       "description": "Poll any background job - push, dump or profile walk."
+    },
+    {
+      "name": "wing_meters",
+      "description": "Live levels per strip from the desk's meter stream: input/output peaks, gate and compressor gain reduction."
+    },
+    {
+      "name": "wing_rta",
+      "description": "The desk's 120-band RTA on one strip, pre- or post-EQ, with stand-out resonances."
+    },
+    {
+      "name": "wing_gain_check",
+      "description": "Soundcheck gain staging in one call: preamp for coarse moves, channel trim for fine smoothing, looped until in range, fader compensated."
+    },
+    {
+      "name": "wing_models",
+      "description": "Every EQ, gate, dynamics, filter and FX model and its controls, including models not loaded on the desk (catalog from libwing, fw 3.0.5)."
+    },
+    {
+      "name": "wing_fade",
+      "description": "Smooth timed moves of faders, sends or any level: absolute or relative, linear-in-dB or S-curve, several at once."
+    },
+    {
+      "name": "wing_fade_status",
+      "description": "Fades currently running."
+    },
+    {
+      "name": "wing_fade_stop",
+      "description": "Stop a fade where it is, or all of them."
+    },
+    {
+      "name": "wing_watch",
+      "description": "Turn the live change feed on or off (uses the desk's single OSC event subscription)."
+    },
+    {
+      "name": "wing_changes",
+      "description": "What changed on the desk recently, and whether this server or someone else changed it."
+    },
+    {
+      "name": "wing_preset_save",
+      "description": "Save part of the desk (a strip, an EQ, a bus) as a named preset on this computer."
+    },
+    {
+      "name": "wing_preset_list",
+      "description": "Saved presets."
+    },
+    {
+      "name": "wing_preset_load",
+      "description": "Recall a preset, optionally onto other channels (copy or move strips)."
+    },
+    {
+      "name": "wing_auto_gate",
+      "description": "Gate thresholds from measured noise floor and playing level (two steps)."
+    },
+    {
+      "name": "wing_auto_compress",
+      "description": "Compressor thresholds for a target gain reduction from measured levels."
+    },
+    {
+      "name": "wing_scene_status",
+      "description": "Open show, active scene and scene list."
+    },
+    {
+      "name": "wing_scene",
+      "description": "Scene recall (GO/NEXT/PREV/GOTAG). Off unless enabled in ~/.wing-mcp/config.json."
     }
   ],
   "compatibility": {

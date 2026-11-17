@@ -59,7 +59,7 @@ import wing_profile as wp    # noqa: E402
 import wing_transport as wt  # noqa: E402
 from wing_push_core import (  # noqa: E402
     NODE_PACE_S, IncrementalReport, firmware_matches, parse_show_file,
-    process_node, read_active_lib, read_stat,
+    process_node, read_active_lib, read_stat, routing_first,
 )
 
 
@@ -144,6 +144,7 @@ def main():
         all_nodes.append((lineno, node, kv, problems))
     if a.limit is not None:
         all_nodes = all_nodes[:a.limit]
+    all_nodes = routing_first(all_nodes)
 
     log("%d node line(s) to process%s%s" % (
         len(all_nodes), " (dry run, nothing will be sent)" if a.dry_run else "",

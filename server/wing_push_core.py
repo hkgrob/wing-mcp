@@ -37,13 +37,13 @@ nothing else) - see _completeness_missing and _is_model_only below.
 """
 
 import os
-import re
 import sys
 import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import wing_catalog as wc    # noqa: E402
 import wing_profile as wp    # noqa: E402
 import wing_transport as wt  # noqa: E402
 
@@ -204,6 +204,19 @@ def process_node(desk, profile, node, kv, dry_run, model_examples):
               "warnings": [], "status": None, "detail": ""}
     original_kv = dict(kv)
 
+    # A channel's in/set carries $g and $vph, mirrors of its SOURCE's preamp
+    # gain and phantom power. Written through the channel they land on
+    # whatever source the channel points at in that moment - the wrong one
+    # whenever the file also re-routes the channel (2026-11-17: a strip move
+    # would have set the electric guitar's preamp to the bass's gain). The
+    # preamp belongs to /io/in, where a file that means to set it says so.
+    if SOURCE_MIRROR_NODE.match(node):
+        for k in ("$g", "$vph"):
+            if k in kv:
+                entry["skipped"][k] = ("source preamp mirror - set it at the source "
+                                       "(/io/in/...), never through a channel")
+                del kv[k]
+
     # Exclusions are policy, never re-checked against the live desk, and
     # never overridden by what a show file asks for.
     for k in list(kv.keys()):
@@ -269,6 +282,10 @@ def process_node(desk, profile, node, kv, dry_run, model_examples):
 
         if dry_run:
             donor = model_examples.get((family, target_mdl))
+            donor_note = "a live sibling node currently on %s" % target_mdl
+            if donor is None:
+                donor = wc.predict_shape(node, live_params, live_mdl, target_mdl)
+                donor_note = "the model catalog (libwing, fw 3.0.5)"
             if donor is None:
                 entry["status"] = "skipped"
                 entry["detail"] = (
@@ -285,8 +302,8 @@ def process_node(desk, profile, node, kv, dry_run, model_examples):
             entry["written"].update(accepted)
             entry["skipped"].update(rejected)
             entry["warnings"].append(
-                "shape PREDICTED from a live sibling node currently on %s, not "
-                "confirmed on %s itself - unverified" % (target_mdl, node))
+                "shape PREDICTED from %s, not confirmed on %s itself - "
+                "unverified" % (donor_note, node))
 
             # Completeness check (see _completeness_missing/_is_model_only
             # above), checked here against the PREDICTED donor shape, which
@@ -301,7 +318,7 @@ def process_node(desk, profile, node, kv, dry_run, model_examples):
                 entry["detail"] = _model_only_detail(target_mdl)
             else:
                 entry["status"] = "written"
-                entry["detail"] = "dry-run, model change predicted from a live sibling"
+                entry["detail"] = "dry-run, model change predicted from %s" % donor_note
                 if missing:
                     entry["partial"] = missing
                     entry["warnings"].append(
@@ -440,6 +457,31 @@ def process_node(desk, profile, node, kv, dry_run, model_examples):
     return entry
 
 
+SOURCE_MIRROR_NODE = __import__("re").compile(r"^/(ch|aux)/\d+/in/set$")
+
+
+def routing_first(nodes):
+    """Reorder (lineno, node, kv, problems) tuples so each strip's in/conn
+    is processed before its in/set: anything in in/set that depends on the
+    source then applies to the source the file routes to."""
+    out, held = [], {}
+    conn_at = {}
+    for item in nodes:
+        n = item[1] or ""
+        if n.endswith("/in/conn"):
+            conn_at[n[:-5]] = True
+    for item in nodes:
+        n = item[1] or ""
+        if n.endswith("/in/set") and conn_at.get(n[:-4]):
+            held[n[:-4]] = item
+            continue
+        out.append(item)
+        if n.endswith("/in/conn") and n[:-5] in held:
+            out.append(held.pop(n[:-5]))
+    out.extend(held.values())
+    return out
+
+
 def _apply_identity_warning(profile, entry, node, original_kv):
     """A channel written with name/col/icon but no clink=0 stores the value
     and shows nothing on the surface (project CLAUDE.md). This checks what
@@ -514,7 +556,7 @@ def load_show_file(path):
         if problems or node is None:
             parse_errors += 1
         all_nodes.append((lineno, node, kv, problems))
-    return all_nodes, parse_errors
+    return routing_first(all_nodes), parse_errors
 
 
 def read_stat(desk):
