@@ -56,6 +56,19 @@ TOOLS = {
     "wing_preset_list": S.wing_preset_list,
     "wing_preset_load": S.wing_preset_load,
     "wing_scene_status": S.wing_scene_status,
+    "wing_audio_check": S.wing_audio_check,
+    "wing_loudness": S.wing_loudness,
+    "wing_loudness_monitor": S.wing_loudness_monitor,
+    "wing_loudness_status": S.wing_loudness_status,
+    "wing_polarity_check": S.wing_polarity_check,
+    "wing_feedback_find": S.wing_feedback_find,
+    "wing_pa_measure": S.wing_pa_measure,
+    "wing_pa_list": S.wing_pa_list,
+    "wing_pa_report": S.wing_pa_report,
+    "wing_pa_average": S.wing_pa_average,
+    "wing_pa_eq": S.wing_pa_eq,
+    "wing_pa_align": S.wing_pa_align,
+    "wing_pa_room": S.wing_pa_room,
 }
 
 PAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui.html")

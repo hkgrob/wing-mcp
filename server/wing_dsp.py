@@ -136,9 +136,10 @@ def xcorr_delay(a, b, fs, max_ms=30.0, band=(100.0, 5000.0)):
     others = np.abs(vals).copy()
     others[max(0, i - 5):i + 6] = 0
     clarity = float(abs(peak) / (others.max() or 1e-9))
+    lag = float(lag)
     return {"lag_samples": round(lag, 2), "lag_ms": round(lag / fs * 1000, 3),
-            "lag_m": round(lag / fs * 343.0, 3), "correlation": round(peak, 3),
-            "polarity": "inverted" if peak < 0 else "same", "clarity": round(clarity, 2)}
+            "lag_m": round(lag / fs * 343.0, 3), "correlation": round(float(peak), 3),
+            "polarity": "inverted" if peak < 0 else "same", "clarity": round(float(clarity), 2)}
 
 
 # --------------------------------------------------------------- feedback
@@ -228,8 +229,7 @@ def transfer_function(ref, mic, fs, nfft=32768, frac=24, grid=None, max_delay_s=
     impulse response for room analysis."""
     ref = np.asarray(ref, float)
     mic = np.asarray(mic, float)
-    d = xcorr_delay(ref, mic, fs, max_ms=max_delay_s * 1000, band=(80.0, 8000.0))
-    lag = int(round(d["lag_samples"]))
+    lag = find_arrival(ref, mic, fs, max_delay_s)
     if lag > 0:
         r, m = ref[:-lag], mic[lag:]
     elif lag < 0:
@@ -242,22 +242,43 @@ def transfer_function(ref, mic, fs, nfft=32768, frac=24, grid=None, max_delay_s=
     _, Gyy = signal.welch(m, fs, window="hann", nperseg=nfft, noverlap=nfft // 2)
     if grid is None:
         grid = log_grid(20.0, min(20000.0, 0.45 * fs))
-    sxy = _smooth(f, Gxy, grid, frac)
-    sxx = _smooth(f, Gxx, grid, frac)
-    syy = _smooth(f, Gyy, grid, frac)
-    H = sxy / np.maximum(sxx, 1e-30)
-    coh = np.abs(sxy) ** 2 / np.maximum(sxx * syy, 1e-30)
-    mag = 20 * np.log10(np.abs(H) + 1e-12)
-    phase = np.degrees(np.angle(H))
+    # Per-bin H1 and coherence first (each averaged over the Welch frames),
+    # then fractional-octave smoothing: magnitude and coherence are
+    # smoothed as powers, phase from the complex-smoothed H. Smoothing the
+    # complex cross-spectrum before forming coherence would cancel the
+    # reverberant field's random phase and understate coherence wherever
+    # the room is live.
+    Hb = Gxy / np.maximum(Gxx, 1e-30)
+    cb = np.abs(Gxy) ** 2 / np.maximum(Gxx * Gyy, 1e-30)
+    mag = 10 * np.log10(_smooth(f, np.abs(Hb) ** 2, grid, frac) + 1e-24)
+    coh = _smooth(f, cb, grid, frac)
+    phase = np.degrees(np.angle(_smooth(f, Hb, grid, frac)))
     # Fine residual delay from the impulse response of the raw H.
     Hraw = Gxy / np.maximum(Gxx, 1e-30)
     ir = np.fft.irfft(Hraw)
     k = int(np.argmax(np.abs(ir[: len(ir) // 2])))
     total = lag + k
     return {"grid_hz": grid, "mag_db": mag, "phase_deg": phase, "coherence": np.clip(coh, 0, 1),
-            "delay_samples": int(total), "delay_ms": round(total / fs * 1000, 3),
-            "distance_m": round(total / fs * 343.0, 2), "polarity_hint": "inverted" if ir[k] < 0 else "same",
+            "delay_samples": int(total), "delay_ms": round(float(total) / fs * 1000, 3),
+            "distance_m": round(float(total) / fs * 343.0, 2), "polarity_hint": "inverted" if ir[k] < 0 else "same",
             "nfft": nfft, "frames": int(len(r) // (nfft // 2))}
+
+
+def find_arrival(ref, mic, fs, max_delay_s=0.5):
+    """Arrival time of the direct sound, in samples, from the impulse
+    response deconvolved with long Welch windows (H1 = Gxy/Gxx). Dividing
+    by the reference spectrum whitens it, so the direct sound stands out
+    as one sharp peak even where reverberation outweighs it - where plain
+    cross-correlation of pink noise in a live room finds a smear and picks
+    a reflection."""
+    nfft = 1 << int(math.ceil(math.log2(max(2 * max_delay_s * fs, 8192))))
+    nfft = min(nfft, 1 << int(math.log2(max(len(ref) // 4, 8192))))
+    _, Gxy = signal.csd(ref, mic, fs, window="hann", nperseg=nfft, noverlap=nfft // 2)
+    _, Gxx = signal.welch(ref, fs, window="hann", nperseg=nfft, noverlap=nfft // 2)
+    ir = np.fft.irfft(Gxy / np.maximum(Gxx, 1e-30))
+    m = min(int(max_delay_s * fs), len(ir) // 2)
+    seg = np.abs(ir[:m])
+    return int(np.argmax(seg))
 
 
 def impulse_response(ref, mic, fs, length_s=2.0):
@@ -458,7 +479,7 @@ def fit_eq(grid, measured_db, target_db, coherence=None, bands=6, fmin=60.0,
         p = np.zeros(0)
     after = err + (model(p) if p.size else 0)
     rms = lambda e: float(np.sqrt(np.sum(w * e ** 2) / max(np.sum(w), 1e-9)))
-    bands_out = [{"f": round(math.exp(lf), 1), "g": round(gn, 1), "q": round(math.exp(lq), 2)}
+    bands_out = [{"f": round(float(math.exp(lf)), 1), "g": round(float(gn), 1), "q": round(float(math.exp(lq)), 2)}
                  for lf, gn, lq in p.reshape(-1, 3)]
     bands_out = [b for b in bands_out if abs(b["g"]) >= 0.5]
     bands_out.sort(key=lambda b: b["f"])

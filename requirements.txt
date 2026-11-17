@@ -1,1 +1,5 @@
 mcp<2
+# optional, for USB audio analysis (wing_audio_check can install these):
+# numpy
+# scipy
+# sounddevice

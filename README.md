@@ -2,7 +2,7 @@
 
 An MCP server that lets Claude control a Behringer WING over OSC on your local network: the full-size WING, the Compact and the Rack. It picks a command profile by the model the desk reports, and comes with a local web GUI that drives the same engine. It is for people who build their own scenes: read any node, write named parameters, dump a subtree to a text file, edit it, and push it back.
 
-Version 0.6.0. See [CHANGELOG.md](CHANGELOG.md).
+Version 0.7.0. See [CHANGELOG.md](CHANGELOG.md).
 
 ## What you need
 
@@ -17,7 +17,7 @@ There is no credential to enter: the desk speaks unauthenticated UDP on the LAN.
 ## Install
 
 1. Install the interpreter and `mcp` as above.
-2. Install `wing-mcp-v0.6.0.mcpb` in Claude Desktop: double-click the file, or go to Settings, then Extensions, then Advanced settings, then Install Extension.
+2. Install `wing-mcp-v0.7.0.mcpb` in Claude Desktop: double-click the file, or go to Settings, then Extensions, then Advanced settings, then Install Extension.
 3. Put the computer on the same LAN as the desk.
 4. Ask Claude to run `wing_list_consoles` and note your desk's name.
 5. Ask Claude to run `wing_connect` with that name, then `wing_get` on `/ch/1`.
@@ -56,9 +56,22 @@ The three share firmware and nearly all of one address tree. They differ in the 
 | `wing_preset_save` / `_list` / `_load` | Named presets of any part of the desk, saved on this computer; load can retarget onto other channels (copy or move strips). |
 | `wing_auto_gate` / `wing_auto_compress` | Gate and compressor thresholds from measured levels. Suggest by default. |
 | `wing_scene_status` / `wing_scene` | Show and scene status; scene recall (GO/NEXT/PREV/GOTAG) only when enabled in `~/.wing-mcp/config.json` with `{"scene_control": true}`. |
+| `wing_audio_check` | Readiness for USB audio analysis; `install=true` installs numpy, scipy and sounddevice. |
+| `wing_loudness` / `_monitor` / `_status` | Stream loudness to EBU R128: integrated LUFS, short-term, loudness range, true peak, against your target. |
+| `wing_polarity_check` | Polarity and arrival difference between two mics on one source; can set invert and delay. |
+| `wing_feedback_find` | Ringing frequencies to about 1.5 Hz with notch suggestions. |
+| `wing_pa_measure` / `_report` / `_average` / `_eq` / `_align` / `_room` | PA tuning: dual-FFT measurement with coherence, multi-position averaging, target curves, EQ fit and apply, mains/subs alignment, room acoustics. |
 | `wing_generate_profile` | Walks your desk in the background and builds its own profile. Read-only against the desk. |
 
 Excluded from the writable set and unreachable from any tool: card format, recording deletes, scene recall, transport, console-wide save, the desk's network settings (IP, mask, gateway, DHCP), the TCP lock and OSC read-only. A bad write to any of those would lock you out until someone fixes it at the surface.
+
+## USB audio analysis
+
+Connect the WING to the computer by USB. Analysis borrows spare USB outputs - the highest-numbered ones routed to nothing, so a stream or recording feed on the low outputs is never touched - points them at what it needs, records, and puts them back. To choose them yourself, put `{"usb_analysis_outs": [47, 48]}` in `~/.wing-mcp/config.json`. Run `wing_audio_check` once with `install=true` to add numpy, scipy and sounddevice, then restart the extension. macOS asks once for microphone access - allow it.
+
+For PA tuning, plug a measurement microphone (an omni such as the Behringer ECM8000, dbx RTA-M or similar, with phantom power) into a spare input and give its input as the mic: `src:A.24` or `ch:40`. Measure several seats, average them, fit the EQ to a target, measure again. Pink noise comes from the desk's own oscillator through a spare channel you name, set up for the test and restored afterwards.
+
+The methods are published standards implemented from their specifications: ITU-R BS.1770-4 and EBU R128 (loudness), dual-channel FFT transfer function and coherence (the technique of Smaart and Open Sound Meter), ISO 3382-1 (room acoustics), RBJ Audio EQ Cookbook (filters).
 
 ## The GUI
 

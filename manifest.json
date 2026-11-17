@@ -1,8 +1,8 @@
 {
   "manifest_version": "0.3",
   "name": "wing-rack-mcp",
-  "display_name": "WING (v0.6.0)",
-  "version": "0.6.0",
+  "display_name": "WING (v0.7.0)",
+  "version": "0.7.0",
   "description": "Controls a Behringer WING - full size, Compact or Rack - over OSC on the LAN. No credentials: the desk is unauthenticated UDP. The command profile is generated off the hardware and chosen by the model the desk reports (ngc-full, wing-compact, wing-rack); the bundle ships the Rack's and wing_generate_profile builds one for any other desk. Destructive, transport, scene-recall and network-identity addresses are excluded from the writable set and unreachable from any tool. Every write is read back and compared. Pushes, dumps and profile walks run as background jobs polled with wing_job_status. Includes live meters, RTA, gain staging, fades, a live change feed, presets, auto-gate/compress and opt-in scene control. Model catalog derived from libwing (Apache-2.0).",
   "author": {
     "name": "Doug Wright"
@@ -137,6 +137,58 @@
     {
       "name": "wing_scene",
       "description": "Scene recall (GO/NEXT/PREV/GOTAG). Off unless enabled in ~/.wing-mcp/config.json."
+    },
+    {
+      "name": "wing_audio_check",
+      "description": "Check (and optionally install) what USB audio analysis needs and find the WING's USB audio device."
+    },
+    {
+      "name": "wing_loudness",
+      "description": "Stream loudness (EBU R128): integrated LUFS, short-term, loudness range, true peak, vs a target."
+    },
+    {
+      "name": "wing_loudness_monitor",
+      "description": "Background loudness meter on a bus for a whole service."
+    },
+    {
+      "name": "wing_loudness_status",
+      "description": "Read the running loudness meter."
+    },
+    {
+      "name": "wing_polarity_check",
+      "description": "Polarity and arrival-time difference between two mics on one source; can set invert/delay."
+    },
+    {
+      "name": "wing_feedback_find",
+      "description": "Precise ringing frequencies with suggested notches; can apply one to an EQ band."
+    },
+    {
+      "name": "wing_pa_measure",
+      "description": "Dual-FFT PA measurement at a mic position: response, phase, coherence, arrival, room reverb. Programme or the desk's pink noise."
+    },
+    {
+      "name": "wing_pa_list",
+      "description": "Saved PA measurements."
+    },
+    {
+      "name": "wing_pa_report",
+      "description": "Response vs a target curve, trust (coherence) and biggest issues."
+    },
+    {
+      "name": "wing_pa_average",
+      "description": "Coherence-weighted average of several positions."
+    },
+    {
+      "name": "wing_pa_eq",
+      "description": "Fit a cut-preferring parametric EQ to the target; apply with backup."
+    },
+    {
+      "name": "wing_pa_align",
+      "description": "Delay and polarity between two parts of the PA (mains/subs/fills); can apply output delay."
+    },
+    {
+      "name": "wing_pa_room",
+      "description": "Room acoustics per octave (ISO 3382): EDT, T20, T30, C50, C80, D50."
     }
   ],
   "compatibility": {

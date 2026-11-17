@@ -96,6 +96,7 @@ label.ck input{width:auto}
       <button data-p="push">Push</button>
       <button data-p="meters">Meters</button>
       <button data-p="live">Live</button>
+      <button data-p="pa">PA &amp; Audio</button>
       <button data-p="profile">Profile</button>
       <button data-p="log">Log</button>
     </nav>
@@ -151,6 +152,17 @@ label.ck input{width:auto}
         <div class="row"><input id="pName" placeholder="name"><input id="pRoots" placeholder="/ch/11, /bus/3"><button id="pSave">Save</button><button id="pList">Refresh</button></div>
         <div id="pOut"></div></div>
       <div class="card"><p><b>Scene</b></p><div class="row"><button id="sStat">Show status</button></div><div id="sOut"></div></div>
+    </div>
+    <div class="pane" id="p-pa">
+      <div class="card"><p><b>Stream loudness</b> - EBU R128 on the bus feeding the stream.</p>
+        <div class="row"><input id="lSrc" value="main:1"><input id="lTgt" value="-16" style="max-width:70px" title="target LUFS"><button id="lOnce">Measure 15 s</button><button class="primary" id="lMon">Monitor</button><button id="lStop">Stop</button></div>
+        <div id="lOut"></div></div>
+      <div class="card" style="max-width:none"><p><b>PA measurement</b> - reference is what's sent to the PA; mic is the measurement mic's input.</p>
+        <div class="row"><input id="mName" placeholder="name, e.g. seat-row5" style="max-width:180px"><input id="mMic" placeholder="mic: src:A.24 or ch:40" style="max-width:190px"><input id="mRef" value="main:1L" style="max-width:110px"><select id="mStim" style="max-width:110px"><option>program</option><option>pink</option></select><input id="mCh" placeholder="pink ch" style="max-width:80px"><input id="mSec" value="15" style="max-width:60px"><button class="primary" id="mGo">Measure</button></div>
+        <div id="mOut"></div>
+        <div class="row" style="margin-top:12px"><select id="mList"></select><select id="mTgt" style="max-width:110px"><option>house</option><option>flat</option><option>live</option></select><select id="mSm" style="max-width:110px"><option value="6">1/6 oct</option><option value="3">1/3 oct</option><option value="12">1/12 oct</option><option value="24">1/24 oct</option></select><button id="mShow">Show</button><button id="mEq">Fit EQ (preview)</button><button id="mRoom">Room</button><button id="mRefresh">↻</button></div>
+        <canvas id="mPlot" width="1100" height="320" style="width:100%;margin-top:10px;background:var(--panel2);border-radius:6px"></canvas>
+        <div id="mInfo"></div></div>
     </div>
     <div class="pane" id="p-profile">
       <div class="card"><p>The command profile is the desk's own list of every parameter, type and range, and every write is checked against it. Build one on any desk whose model has none yet (a full WING or a Compact), and again after a firmware update. Read-only; takes several minutes.</p>
@@ -446,6 +458,57 @@ async function listPresets() {
 $("#pList").onclick = listPresets;
 $("#pSave").onclick = async () => { const r = await call("wing_preset_save", {name: $("#pName").value.trim(), roots: $("#pRoots").value.split(",").map(x => x.trim()).filter(Boolean)}); msg($("#pOut"), r, r.ok ? `Saved ${r.lines} lines → ${r.path}` : ""); if (r.ok) setTimeout(listPresets, 400); };
 $("#sStat").onclick = async () => { const r = await call("wing_scene_status"); msg($("#sOut"), r, r.ok ? `Show: ${r.actshow}\nActive: ${r.active}\nScenes: ${(r.scenes || []).join(", ")}\nScene control from Claude: ${r.scene_control_enabled ? "enabled" : "off"}` : ""); };
+
+// ---------- PA & audio
+let lTimer = null;
+function lShow(r) { return `<div class="kv">${[["Integrated", r.integrated_lufs + " LUFS"], ["Short-term (3 s)", r.short_term_last_lufs], ["Short-term max", r.short_term_max_lufs], ["True peak", r.true_peak_dbtp + " dBTP"], ["Loudness range", r.loudness_range_lu + " LU"], ["Running", (r.running_s ?? r.seconds) + " s"], ["Advice", r.advice || ""], ["", r.peak_warning || ""]].map(([k, v]) => `<div>${esc(k)}</div><div>${esc(v ?? "")}</div>`).join("")}</div>`; }
+$("#lOnce").onclick = async () => { $("#lOut").innerHTML = '<p class="dim">Measuring…</p>'; const r = await call("wing_loudness", {source: $("#lSrc").value.trim(), seconds: 15, target_lufs: +$("#lTgt").value}); $("#lOut").innerHTML = r.ok ? lShow(r) : `<div class="msg bad">${esc(r.error)}</div>`; };
+$("#lMon").onclick = async () => { const r = await call("wing_loudness_monitor", {on: true, source: $("#lSrc").value.trim(), target_lufs: +$("#lTgt").value}); if (!r.ok) return msg($("#lOut"), r); clearInterval(lTimer); lTimer = setInterval(async () => { const s = await fetch("/api/wing_loudness_status", {method: "POST", body: "{}"}).then(x => x.json()); if (s.ok) $("#lOut").innerHTML = lShow(s); }, 2000); };
+$("#lStop").onclick = async () => { clearInterval(lTimer); const r = await call("wing_loudness_monitor", {on: false}); $("#lOut").innerHTML = r.final ? lShow(r.final) : ""; };
+async function mRefresh() { const r = await call("wing_pa_list"); $("#mList").innerHTML = r.measurements.map(m => `<option>${esc(m.name)}</option>`).join(""); }
+$("#mRefresh").onclick = mRefresh;
+$("#mGo").onclick = async () => {
+  const a = {name: $("#mName").value.trim(), mic: $("#mMic").value.trim(), reference: $("#mRef").value.trim(), stimulus: $("#mStim").value, seconds: +$("#mSec").value || 15, overwrite: true};
+  if (a.stimulus === "pink") { a.stimulus_channel = +$("#mCh").value; if (!confirm("Play pink noise through the PA on channel " + a.stimulus_channel + "?")) return; }
+  $("#mOut").innerHTML = '<p class="dim">Measuring - keep the room quiet…</p>';
+  const r = await call("wing_pa_measure", a);
+  msg($("#mOut"), r, r.ok ? `Arrival ${r.arrival_ms} ms · coherence ${r.median_coherence_100Hz_10kHz} (${r.quality}) · RT60 ${r.rt60_s_mid ?? "-"} s` : "");
+  if (r.ok) { await mRefresh(); $("#mList").value = a.name; plot(); }
+};
+function drawPlot(c, eqb) {
+  const cv = $("#mPlot"), g = cv.getContext("2d"), W = cv.width, H = cv.height, L = 40, B = 24;
+  g.clearRect(0, 0, W, H); g.font = "11px sans-serif";
+  const fx = f => L + (W - L - 10) * Math.log10(f / 20) / 3, fy = d => 10 + (H - B - 10) * (12 - d) / 36;
+  g.strokeStyle = "#2e333a"; g.fillStyle = "#8b939e";
+  [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000].forEach(f => { g.beginPath(); g.moveTo(fx(f), 10); g.lineTo(fx(f), H - B); g.stroke(); g.fillText(f >= 1000 ? f / 1000 + "k" : f, fx(f) - 8, H - 8); });
+  for (let d = -24; d <= 12; d += 6) { g.beginPath(); g.moveTo(L, fy(d)); g.lineTo(W - 10, fy(d)); g.stroke(); g.fillText(d, 8, fy(d) + 4); }
+  c.hz.forEach((f, i) => { if (f < 20) return; const a = c.coherence[i]; g.fillStyle = `rgba(79,191,122,${0.08 + 0.25 * a})`; g.fillRect(fx(f), H - B - 30 * a, 2, 30 * a); });
+  const line = (arr, col, w) => { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); c.hz.forEach((f, i) => { const x = fx(f), y = fy(arr[i]); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke(); g.lineWidth = 1; };
+  line(c.target_db, "#8b939e", 1.5); line(c.mag_db, "#e8a23a", 2);
+  if (eqb) line(eqb, "#5aa9e6", 2);
+  g.fillStyle = "#e8a23a"; g.fillText("measured", W - 220, 22); g.fillStyle = "#8b939e"; g.fillText("target", W - 160, 22); g.fillStyle = "#4fbf7a"; g.fillText("coherence", W - 115, 22); if (eqb) { g.fillStyle = "#5aa9e6"; g.fillText("with EQ", W - 55, 22); }
+}
+let lastCurves = null;
+async function plot() {
+  const r = await call("wing_pa_report", {name: $("#mList").value, target: $("#mTgt").value, smoothing: +$("#mSm").value, curves: true});
+  if (!r.ok) return msg($("#mInfo"), r);
+  lastCurves = r.curves; drawPlot(r.curves);
+  $("#mInfo").innerHTML = `<p>${esc(r.biggest_issues.join(" · "))}</p>${r.coherence_note ? `<p class="dim">${esc(r.coherence_note)} (${r.low_coherence_hz.join(", ")} Hz)</p>` : ""}<p class="dim">Arrival ${r.arrival_ms} ms · RT60 mid ${r.rt60_s_mid ?? "-"} s</p>`;
+}
+$("#mShow").onclick = plot;
+$("#mEq").onclick = async () => {
+  const r = await call("wing_pa_eq", {name: $("#mList").value, target: $("#mTgt").value});
+  if (!r.ok) return msg($("#mInfo"), r);
+  $("#mInfo").innerHTML = `<p><b>Suggested EQ for ${esc(r.node)}</b> (${esc(r.eq_model)}) - error ${r.rms_error_db.before} → ${r.rms_error_db.predicted_after} dB RMS. Ask Claude to apply it, or apply below.</p><table><tbody>${r.bands.map(b => `<tr><td>${b.f} Hz</td><td>${b.g > 0 ? "+" : ""}${b.g} dB</td><td>Q ${b.q}</td></tr>`).join("")}</tbody></table><button class="primary" id="mEqApply" style="margin-top:8px">Apply to ${esc(r.node)}</button>${r.note ? `<p class="dim">${esc(r.note)}</p>` : ""}`;
+  $("#mEqApply").onclick = async () => { if (!confirm("Replace the parametric EQ on " + r.node + "? A backup preset is saved first.")) return; msg($("#mInfo"), await call("wing_pa_eq", {name: $("#mList").value, target: $("#mTgt").value, apply: true}), "Applied. Measure again to check."); };
+};
+$("#mRoom").onclick = async () => {
+  const r = await call("wing_pa_room", {name: $("#mList").value});
+  if (!r.ok) return msg($("#mInfo"), r);
+  const cols = ["EDT_s", "T20_s", "T30_s", "C50_db", "C80_db", "D50_pct"];
+  $("#mInfo").innerHTML = `<p>${esc(r.summary.join(" · "))}</p><table><thead><tr><th>Band</th>${cols.map(c => `<th>${c.replace("_", " ")}</th>`).join("")}</tr></thead><tbody>${Object.entries(r.bands).map(([b, v]) => `<tr><td>${esc(b)}</td>${cols.map(c => `<td>${v[c] ?? "-"}</td>`).join("")}</tr>`).join("")}</tbody></table>${r.caveat ? `<p class="dim">${esc(r.caveat)}</p>` : ""}`;
+};
+document.querySelector('[data-p="pa"]').addEventListener("click", () => mRefresh().catch(() => {}));
 
 refreshStatus().then(v => { if (v.connected_to) loadTree(); });
 </script>

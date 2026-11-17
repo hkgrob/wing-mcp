@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0 - 2026-11-17
+
+USB audio analysis. With the WING connected to the computer by USB, the server borrows unused USB outputs (highest-numbered outputs routed to nothing, or those named in `config.json` as `usb_analysis_outs`), records, and restores them. Needs numpy, scipy and sounddevice - `wing_audio_check(install=true)` installs them.
+
+- **Stream loudness** (`wing_loudness`, `wing_loudness_monitor`, `wing_loudness_status`): ITU-R BS.1770-4 / EBU R128 integrated, momentary, short-term, loudness range and true peak, against a target; a background meter for a whole service. Verified against EBU Tech 3341/3342 test signals.
+- **Polarity and delay** (`wing_polarity_check`): arrival difference and polarity between two mics on one source; can set the channel's invert and input delay.
+- **Feedback finder** (`wing_feedback_find`): ringing tones to about 1.5 Hz, told apart from moving musical notes, with notch suggestions; can write one into an EQ band.
+- **PA tuning**: `wing_pa_measure` (dual-FFT H1 transfer function with coherence, arrival from the deconvolved impulse response, room reverberation; programme material or the desk's own pink-noise oscillator on a spare channel that is fully restored afterwards), `wing_pa_report` (third-octave deviation from flat / house / live / custom targets, trusted only where coherence says so), `wing_pa_average` (coherence-weighted multi-position average), `wing_pa_eq` (cut-preferring least-squares parametric fit, applied to the bus EQ with an automatic backup preset), `wing_pa_align` (mains/subs/fills delay and crossover polarity, applied to output delay), `wing_pa_room` (ISO 3382 EDT, T20, T30, C50, C80, D50). Mic calibration files are supported.
+- GUI: a PA & Audio tab - loudness meter, measurement, response plot with target and coherence, EQ preview/apply, room table.
+
 ## 0.6.0 - 2026-11-17
 
 New:

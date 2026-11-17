@@ -68,7 +68,7 @@ import wing_transport as wt  # noqa: E402
 from wing_profile import Profile  # noqa: E402
 from wing_push_core import PushJob, firmware_matches  # noqa: E402
 
-SERVER_VERSION = "0.6.0"
+SERVER_VERSION = "0.7.0"
 
 mcp = FastMCP("wing")
 
@@ -1523,6 +1523,732 @@ def wing_scene(action: str, index: int | None = None) -> dict:
             "before": {k: before.get(k) for k in ("active", "actidx")},
             "after": {k: after.get(k) for k in ("active", "actidx")},
             "note": "The desk's active-scene name can lag; check the surface."}
+
+
+
+# ======================================================== USB audio analysis
+
+import wing_audio as wa  # noqa: E402
+
+_audio: dict = {"monitor": None}
+
+
+def _config():
+    try:
+        with open(os.path.join(wp.USER_DIR, "config.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _audio_ready():
+    missing = wa.check_deps()
+    if missing:
+        raise RuntimeError("Audio analysis needs the Python packages %s. Run wing_audio_check "
+                           "with install=true, then restart the extension." % ", ".join(missing))
+    idx, info = wa.find_device()
+    if idx is None:
+        names = ", ".join(d["name"] for d in info) or "none"
+        raise RuntimeError("No WING USB audio device found (inputs seen: %s). Connect the USB "
+                           "cable, or set WING_AUDIO_DEVICE to part of its name." % names)
+    return idx, info
+
+
+def _grab(sources, seconds):
+    """Route the sources' legs to borrowed USB outputs, record, restore.
+    Returns (samples, rate, legs)."""
+    d = _desk()
+    dev, _ = _audio_ready()
+    legs = []
+    for src in sources:
+        legs += wa.parse_source(src, d)
+    outs = wa.pick_outputs(d, len(legs), _config().get("usb_analysis_outs"))
+    with wa.Routed(d, outs, legs):
+        _time.sleep(0.3)
+        x, rate = wa.capture(dev, outs, seconds)
+    return x, rate, legs
+
+
+@_tool(False, 'Audio setup check')
+def wing_audio_check(install: bool = False) -> dict:
+    """Is USB audio analysis ready? Checks the Python packages it needs
+    (numpy, scipy, sounddevice) - install=true installs any missing ones
+    into the interpreter running this server - and looks for the WING's
+    USB audio device. macOS asks once for microphone access the first time
+    audio is recorded; allow it."""
+    out = {"ok": True, "python": sys.executable}
+    if install:
+        out["install"] = wa.install_deps()
+    missing = wa.check_deps()
+    out["missing_packages"] = missing
+    if missing:
+        out["ok"] = False
+        out["note"] = "Missing packages. Run again with install=true, then restart the extension."
+        return out
+    try:
+        idx, info = wa.find_device()
+    except Exception as exc:
+        return {**out, "ok": False, "error": "audio system: %s" % exc}
+    if idx is None:
+        out.update(ok=False, inputs_seen=info, note="Connect the WING by USB.")
+    else:
+        out["device"] = {"index": idx, "name": info["name"], "inputs": info["max_input_channels"],
+                         "rate": info.get("default_samplerate")}
+        if _state["desk"] is not None:
+            try:
+                out["analysis_usb_outputs"] = wa.pick_outputs(_desk(), 2, _config().get("usb_analysis_outs"))
+            except Exception as exc:
+                out["analysis_usb_outputs_problem"] = str(exc)
+    return out
+
+
+# ----------------------------------------------------------- loudness
+
+def _loudness_verdict(L, target, tp_max):
+    out = {}
+    il = L.get("integrated_lufs")
+    if il is not None:
+        out["vs_target_lu"] = round(il - target, 1)
+        out["advice"] = ("on target" if abs(il - target) <= 1 else
+                         "%.1f LU %s target: %s the stream feed about %.0f dB" %
+                         (abs(il - target), "under" if il < target else "over",
+                          "raise" if il < target else "lower", abs(il - target)))
+    tp = L.get("true_peak_dbtp")
+    if tp is not None and tp > tp_max:
+        out["peak_warning"] = ("true peak %.1f dBTP is over %.1f - the stream encoder will clip; "
+                               "a limiter on that bus fixes it" % (tp, tp_max))
+    return out
+
+
+@_tool(True, 'Measure loudness')
+def wing_loudness(source: str = "main:1", seconds: float = 30.0,
+                  target_lufs: float = -16.0, true_peak_max: float = -1.0) -> dict:
+    """Loudness of a mix the way streaming platforms measure it (ITU-R
+    BS.1770 / EBU R128): integrated LUFS, loudest momentary and short-term,
+    loudness range, true peak. source: the bus feeding the stream
+    ("bus:5", "main:1", "mtx:2"). Common targets: YouTube/most platforms
+    about -14 LUFS, many church streams -16 to -18; true peak under -1
+    dBTP. Measures `seconds` of whatever is playing - for a whole service,
+    use wing_loudness_monitor. Temporarily borrows two unused USB outputs."""
+    try:
+        x, rate, legs = _grab([source], seconds)
+        import wing_dsp as wd
+        L = wd.loudness(x, rate)
+    except RuntimeError as exc:
+        return _err(str(exc))
+    except Exception as exc:
+        return _err("loudness: %s: %s" % (type(exc).__name__, exc))
+    if L.get("integrated_lufs") is None:
+        return {"ok": False, "error": "Silence (below -70 LUFS). Is %s playing?" % source, **L}
+    return {"ok": True, "source": source, "legs": [l[0] for l in legs], "target_lufs": target_lufs,
+            **L, **_loudness_verdict(L, target_lufs, true_peak_max)}
+
+
+@_tool(False, 'Loudness monitor')
+def wing_loudness_monitor(on: bool = True, source: str = "main:1",
+                          target_lufs: float = -16.0, true_peak_max: float = -1.0) -> dict:
+    """Run a loudness meter on a bus in the background - for a whole service
+    - and read it any time with wing_loudness_status: integrated loudness
+    since it started, the last 3 seconds, peaks, and how long it has been
+    over the true-peak limit. Holds two USB outputs until turned off, when
+    they are restored."""
+    mon = _audio.get("monitor")
+    if not on:
+        if mon:
+            mon["stream"].stop()
+            mon["routed"].__exit__(None, None, None)
+            _audio["monitor"] = None
+            return {"ok": True, "stopped": True, "final": _loudness_snapshot(mon)}
+        return {"ok": True, "stopped": False, "note": "No monitor running."}
+    if mon:
+        return {"ok": False, "error": "A loudness monitor is already running on %s." % mon["source"]}
+    try:
+        d = _desk()
+        dev, _ = _audio_ready()
+        legs = wa.parse_source(source, d)
+        outs = wa.pick_outputs(d, len(legs), _config().get("usb_analysis_outs"))
+        routed = wa.Routed(d, outs, legs).__enter__()
+        st = wa.Stream(dev, outs, seconds_kept=3600.0)
+        st.start()
+    except Exception as exc:
+        return _err("monitor: %s" % exc)
+    _audio["monitor"] = {"stream": st, "routed": routed, "source": source, "started": _time.time(),
+                         "target": target_lufs, "tp_max": true_peak_max}
+    return {"ok": True, "running": True, "source": source, "usb_outputs": outs,
+            "note": "Read it with wing_loudness_status; stop with on=false."}
+
+
+def _loudness_snapshot(mon):
+    import wing_dsp as wd
+    st = mon["stream"]
+    secs = st.filled / st.rate
+    x = st.last(secs)
+    L = wd.loudness(x, st.rate) if secs >= 3 else {}
+    L["running_s"] = round(_time.time() - mon["started"], 0)
+    L.update(_loudness_verdict(L, mon["target"], mon["tp_max"]))
+    return L
+
+
+@_tool(True, 'Loudness status')
+def wing_loudness_status() -> dict:
+    """The running loudness monitor's readings (up to the last hour)."""
+    mon = _audio.get("monitor")
+    if not mon:
+        return _err("No loudness monitor running. Start one with wing_loudness_monitor.")
+    return {"ok": True, "source": mon["source"], "target_lufs": mon["target"],
+            **_loudness_snapshot(mon)}
+
+
+# ------------------------------------------------------ polarity / delay
+
+@_tool(False, 'Polarity and delay check')
+def wing_polarity_check(a: str, b: str, seconds: float = 5.0, apply: bool = False) -> dict:
+    """Do two mics on one source (snare top and bottom, kick in and out,
+    overheads against the snare, a DI and an amp mic) fight each other?
+    Records both raw inputs while the source plays and finds the arrival
+    time difference and whether one is polarity-inverted against the other.
+
+    a, b: "ch:15" (the input feeding channel 15) or "src:A.14". With
+    apply=true and b given as a channel, sets channel b's polarity invert
+    and/or input delay so it lines up with a (only when b arrives EARLIER -
+    delay can't make a late signal earlier; then delay a instead)."""
+    try:
+        x, rate, legs = _grab([a, b], seconds)
+        import wing_dsp as wd
+        r = wd.xcorr_delay(x[0], x[1], rate, max_ms=30.0)
+    except RuntimeError as exc:
+        return _err(str(exc))
+    except Exception as exc:
+        return _err("polarity check: %s: %s" % (type(exc).__name__, exc))
+    out = {"ok": True, "a": legs[0][0], "b": legs[1][0], **r}
+    if abs(r["correlation"]) < 0.2 or r["clarity"] < 1.3:
+        out["verdict"] = ("no clear relationship - are both mics hearing the same source, "
+                          "and is it playing?")
+        return out
+    advice = []
+    if r["polarity"] == "inverted":
+        advice.append("flip polarity on %s" % b)
+    if abs(r["lag_ms"]) >= 0.1:
+        late, early = (b, a) if r["lag_ms"] > 0 else (a, b)
+        advice.append("%s arrives %.2f ms (%.2f m) after %s: delay %s by that much"
+                      % (late, abs(r["lag_ms"]), abs(r["lag_m"]), early, early))
+    out["verdict"] = "; ".join(advice) or "aligned and in polarity"
+    if apply:
+        m = _re.match(r"^ch:(\d+)$", b.strip())
+        if not m:
+            out["applied"] = "not applied: b must be given as ch:N"
+            return out
+        node = "/ch/%s/in/set" % m.group(1)
+        kv = {}
+        if r["polarity"] == "inverted":
+            cur = (_desk().describe(node, with_values=True) or {}).get("params", {}).get("inv", {}).get("value")
+            kv["inv"] = 0 if str(cur) == "1" else 1
+        if r["lag_ms"] < -0.1:
+            kv.update(dlymode="M", dly=round(max(0.1, abs(r["lag_m"])), 1), dlyon=1)
+        elif r["lag_ms"] > 0.1:
+            out["applied_note"] = "b is late; delay %s instead (not done automatically)" % a
+        if kv:
+            try:
+                _desk().write_node(node, kv, verify=True)
+                out["applied"] = {node: kv}
+            except wt.WriteRejected as exc:
+                out["applied"] = "write failed: %s" % exc
+    return out
+
+
+# -------------------------------------------------------------- feedback
+
+@_tool(False, 'Find feedback')
+def wing_feedback_find(source: str = "main:1L", seconds: float = 5.0, top: int = 5,
+                       notch_node: str | None = None, apply: bool = False) -> dict:
+    """Find ringing frequencies precisely (to about 1.5 Hz): narrow tones
+    that stay put while everything else moves - feedback, or a resonance
+    on the edge of it. Ring the system gently (raise the mic or wedge until
+    it just starts to ring) and run this. Each finding comes with a
+    suggested notch: frequency, -6 dB, Q 4-10.
+
+    With notch_node (e.g. "/bus/3/eq" for a wedge mix, "/main/1/eq") and
+    apply=true, the strongest finding is written to that EQ's band with the
+    least gain in use - check the node's EQ model is STD first."""
+    try:
+        x, rate, legs = _grab([source], seconds)
+        import wing_dsp as wd
+        peaks, info = wd.ringing_peaks(x, rate, top=top)
+    except RuntimeError as exc:
+        return _err(str(exc))
+    except Exception as exc:
+        return _err("feedback: %s: %s" % (type(exc).__name__, exc))
+    out = {"ok": True, "source": source, "findings": peaks, **info}
+    if not peaks:
+        out["note"] = "Nothing ringing. Push the gain until it just starts to ring, then run again."
+    if apply and notch_node and peaks:
+        d = _desk()
+        p = (d.describe(notch_node, with_values=True) or {}).get("params", {})
+        bands = sorted(int(k[:-1]) for k in p if _re.match(r"^\d+g$", k))
+        if not bands:
+            return {**out, "applied": "no parametric bands on %s" % notch_node}
+        free = min(bands, key=lambda n: abs(_num(p["%dg" % n]["value"]) or 0))
+        n = peaks[0]["suggested_notch"]
+        kv = {"%df" % free: n["f"], "%dg" % free: n["g"], "%dq" % free: n["q"], "on": 1}
+        try:
+            d.write_node(notch_node, kv, verify=True)
+            out["applied"] = {notch_node: kv}
+        except wt.WriteRejected as exc:
+            out["applied"] = "write failed: %s" % exc
+    return out
+
+
+# ============================================================ PA tuning
+
+def _meas_dir():
+    p = os.path.join(wp.USER_DIR, "measurements")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def _meas_path(name, ext=".json"):
+    safe = _re.sub(r"[^A-Za-z0-9 _.-]+", "-", name).strip()
+    if not safe:
+        raise ValueError("empty measurement name")
+    return os.path.join(_meas_dir(), safe + ext)
+
+
+def _load_meas(name):
+    with open(_meas_path(name), encoding="utf-8") as f:
+        m = json.load(f)
+    import numpy as np
+    for k in ("grid_hz", "mag_db", "phase_deg", "coherence"):
+        m[k] = np.asarray(m[k], float)
+    return m
+
+
+def _save_meas(name, m):
+    import numpy as np
+    out = {k: (np.round(np.asarray(v, float), 3).tolist() if k in ("grid_hz", "mag_db", "phase_deg", "coherence") else v)
+           for k, v in m.items()}
+    with open(_meas_path(name), "w", encoding="utf-8") as f:
+        json.dump(out, f)
+
+
+def _read_cal(path, grid):
+    """Mic calibration file (UMIK/miniDSP style: 'freq dB' per line, header
+    lines ignored) interpolated onto grid, in dB to subtract."""
+    import numpy as np
+    pts = []
+    for line in open(os.path.expanduser(path), encoding="utf-8", errors="ignore"):
+        parts = line.replace(",", " ").replace("\t", " ").split()
+        try:
+            pts.append((float(parts[0]), float(parts[1])))
+        except (ValueError, IndexError):
+            continue
+    if len(pts) < 2:
+        raise ValueError("no frequency/dB pairs in %s" % path)
+    pts.sort()
+    f, db = zip(*pts)
+    return np.interp(np.log2(grid), np.log2(f), db)
+
+
+class _Stimulus:
+    """Pink noise from the desk's own oscillator, played through a spare
+    channel to the mains: everything it touches is saved first and put
+    back afterwards, its sends are switched off so no monitor gets noise,
+    and it fades in and out rather than starting at full level."""
+
+    def __init__(self, desk, ch, level_db, main=1):
+        self.d, self.ch, self.level, self.main = desk, ch, level_db, main
+        self.saved = []
+
+    def _save(self, node, keys):
+        p = (self.d.describe(node, with_values=True) or {}).get("params", {})
+        kv = {k: p[k]["value"] for k in keys if k in p and p[k]["value"] is not None}
+        if kv:
+            self.saved.append((node, kv))
+        return p
+
+    def __enter__(self):
+        c = "/ch/%d" % self.ch
+        self._save("/io/in/OSC/1/osc", ("mode", "lvl"))
+        self._save("%s/in/conn" % c, ("grp", "in"))
+        self._save(c, ("mute", "fdr"))
+        for sect in ("eq", "gate", "dyn"):
+            self._save("%s/%s" % (c, sect), ("on",))
+        for i in range(1, 5):
+            self._save("%s/main/%d" % (c, i), ("on", "lvl"))
+        top = self.d.describe(c + "/send", with_values=False) or {}
+        for s in top.get("children", []):
+            self._save("%s/send/%s" % (c, s), ("on",))
+        self.d.write_node(c, {"fdr": "-oo"}, verify=True)
+        for node, kv in self.saved:
+            if "/send/" in node:
+                self.d.write_node(node, {"on": 0}, verify=True)
+        for sect in ("eq", "gate", "dyn"):
+            self.d.write_node("%s/%s" % (c, sect), {"on": 0}, verify=True)
+        for i in range(1, 5):
+            self.d.write_node("%s/main/%d" % (c, i), {"on": 1 if i == self.main else 0, "lvl": 0}, verify=True)
+        self.d.write_node("/io/in/OSC/1/osc", {"mode": "PINK", "lvl": self.level}, verify=True)
+        self.d.write_node("%s/in/conn" % c, {"grp": "OSC", "in": 1}, verify=True)
+        self.d.write_node(c, {"mute": 0}, verify=True)
+        f = _fader.start(self.d, [(c, "fdr", float("-inf"), 0.0)], 2.0, "s")
+        f.thread.join(5)
+        _time.sleep(0.5)
+        return self
+
+    def __exit__(self, *exc):
+        c = "/ch/%d" % self.ch
+        try:
+            f = _fader.start(self.d, [(c, "fdr", 0.0, float("-inf"))], 1.5, "s")
+            f.thread.join(4)
+        except Exception:
+            pass
+        for node, kv in reversed(self.saved):
+            try:
+                self.d.write_node(node, kv, verify=True)
+            except Exception:
+                pass
+        return False
+
+
+@_tool(False, 'PA measure')
+def wing_pa_measure(name: str, mic: str, reference: str = "main:1L", seconds: float = 15.0,
+                    stimulus: str = "program", stimulus_channel: int | None = None,
+                    stimulus_level_db: float = -20.0, mic_cal: str | None = None,
+                    overwrite: bool = False) -> dict:
+    """Measure the PA at one microphone position, Smaart-style: the signal
+    sent to the PA (reference, default Main 1 left) is compared with what a
+    measurement mic hears, giving the system's frequency response, phase,
+    coherence (how much of what the mic hears is the PA rather than noise
+    or reverberation) and arrival time - plus the room's reverberation.
+
+    mic: the measurement mic's input - "src:A.24", "src:LCL.8" or "ch:40"
+    (the input feeding that channel). Put it where the audience sits, at
+    ear height, away from walls.
+    stimulus: "program" measures with whatever is playing (music works,
+    speech is patchy); "pink" plays pink noise from the desk's oscillator
+    through stimulus_channel (a spare channel; it is set up for the test
+    and fully restored after, its sends switched off) at
+    stimulus_level_db (-40..-6). Pink noise is LOUD - warn the room.
+    mic_cal: path to the mic's calibration file, if it has one.
+
+    Saved by name; measure several positions and combine them with
+    wing_pa_average. Then wing_pa_report, wing_pa_eq, wing_pa_align,
+    wing_pa_room."""
+    try:
+        path = _meas_path(name)
+    except ValueError as exc:
+        return _err(str(exc))
+    if os.path.exists(path) and not overwrite:
+        return _err("A measurement named %r exists; pass overwrite=true or another name." % name)
+    if stimulus not in ("program", "pink"):
+        return _err("stimulus must be program or pink")
+    if stimulus == "pink" and not stimulus_channel:
+        return _err("Pink noise needs stimulus_channel: a spare channel number to play it on.")
+    if _running_job():
+        return _err("A background job is running; measure after it finishes.")
+    try:
+        import numpy as np
+        import wing_dsp as wd
+        d = _desk()
+        wa.parse_source(reference, d)        # validate both before anything moves
+        wa.parse_source(mic, d)
+        if stimulus == "pink":
+            with _Stimulus(d, int(stimulus_channel), stimulus_level_db,
+                           main=int(_re.findall(r"\d+", reference)[0]) if reference.startswith("main") else 1):
+                x, rate, legs = _grab([reference, mic], seconds)
+        else:
+            x, rate, legs = _grab([reference, mic], seconds)
+        ref, micx = x[0], x[-1]
+        if np.sqrt(np.mean(ref ** 2)) < 1e-4:
+            return _err("The reference (%s) is silent. Play something, or use stimulus=pink." % reference)
+        tf = wd.transfer_function(ref, micx, rate)
+        if mic_cal:
+            tf["mag_db"] = tf["mag_db"] - _read_cal(mic_cal, tf["grid_hz"])
+        ir = wd.impulse_response(ref, micx, rate, length_s=min(2.5, seconds / 6))
+        room = wd.room_metrics(ir, rate)
+        np.save(_meas_path(name, ".ir.npy"), ir.astype("float32"))
+    except RuntimeError as exc:
+        return _err(str(exc))
+    except Exception as exc:
+        return _err("measure: %s: %s" % (type(exc).__name__, exc))
+    g, coh = tf["grid_hz"], tf["coherence"]
+    band = (g >= 100) & (g <= 10000)
+    m = {"name": name, "time": _time.strftime("%Y-%m-%d %H:%M"), "mic": mic,
+         "reference": reference, "stimulus": stimulus, "seconds": seconds, "rate": rate,
+         "mic_cal": mic_cal, "delay_ms": tf["delay_ms"], "distance_m": tf["distance_m"],
+         "polarity_hint": tf["polarity_hint"], "room": room,
+         "grid_hz": g, "mag_db": tf["mag_db"], "phase_deg": tf["phase_deg"], "coherence": coh}
+    _save_meas(name, m)
+    q = float(np.median(coh[band]))
+    return {"ok": True, "name": name, "saved": path, "arrival_ms": tf["delay_ms"],
+            "arrival_note": "includes the system's electronic latency, so read it as relative "
+                            "between measurements, not as a distance",
+            "polarity_hint": tf["polarity_hint"],
+            "median_coherence_100Hz_10kHz": round(q, 2),
+            "quality": ("good" if q > 0.8 else "usable" if q > 0.55 else
+                        "poor - more level, longer measurement, or a quieter room"),
+            "rt60_s_mid": _rt_mid(room),
+            "next": "wing_pa_report(%r) for the response; wing_pa_eq to fit an EQ." % name}
+
+
+def _rt_mid(room):
+    vals = [room.get(k, {}).get("T30_s") or room.get(k, {}).get("T20_s") for k in ("500", "1000")]
+    vals = [v for v in vals if v]
+    return round(sum(vals) / len(vals), 2) if vals else None
+
+
+@_tool(True, 'PA measurements')
+def wing_pa_list() -> dict:
+    """Saved PA measurements: name, when, mic, reference, quality."""
+    rows = []
+    for fn in sorted(os.listdir(_meas_dir())):
+        if fn.endswith(".json"):
+            try:
+                with open(os.path.join(_meas_dir(), fn), encoding="utf-8") as f:
+                    m = json.load(f)
+                rows.append({k: m.get(k) for k in ("name", "time", "mic", "reference", "stimulus",
+                                                    "delay_ms", "averaged_from")})
+            except (OSError, ValueError):
+                continue
+    return {"ok": True, "measurements": rows}
+
+
+def _smoothed(m, frac):
+    import numpy as np
+    g = m["grid_hz"]
+    if frac >= 24:
+        return m["mag_db"]
+    half = 2 ** (0.5 / frac)
+    lg = np.log2(g)
+    out = np.empty_like(m["mag_db"])
+    p = 10 ** (m["mag_db"] / 10)
+    for i in range(len(g)):
+        s = np.abs(lg - lg[i]) <= np.log2(half)
+        out[i] = 10 * np.log10(p[s].mean())
+    return out
+
+
+@_tool(True, 'PA report')
+def wing_pa_report(name: str, smoothing: int = 6, target: str = "house",
+                   target_points: list | None = None, curves: bool = False) -> dict:
+    """A saved measurement read as a tuner would: third-octave levels
+    against the target curve (level-matched at 200 Hz-5 kHz, so only the
+    shape counts), where the coherence says the reading can be trusted,
+    the biggest problems, and the room's acoustics. target: flat, house
+    (speech/worship: gentle HF roll-off, a little LF lift), live
+    (contemporary music: steeper tilt, more low end) or custom with
+    target_points [[hz, db], ...]. curves=true adds the full arrays."""
+    try:
+        import numpy as np
+        import wing_dsp as wd
+        m = _load_meas(name)
+    except (OSError, ValueError) as exc:
+        return _err("measurement %r: %s" % (name, exc))
+    g = m["grid_hz"]
+    mag = _smoothed(m, smoothing)
+    t = wd.target_curve(g, "custom" if target_points else target, target_points)
+    ref = (g >= 200) & (g <= 5000)
+    dev = mag - t - np.mean(mag[ref] - t[ref])
+    table = wd.octave_table(g, dev, m["coherence"])
+    trusted = [r for r in table if r.get("coherence", 1) >= 0.6]
+    worst = sorted(trusted, key=lambda r: -abs(r["db"]))[:4]
+    issues = []
+    for r in worst:
+        if abs(r["db"]) >= 3:
+            issues.append("%s Hz %+.1f dB %s target" % (r["hz"], r["db"], "over" if r["db"] > 0 else "under"))
+    low = [r["hz"] for r in table if r.get("coherence", 1) < 0.5]
+    out = {"ok": True, "name": name, "target": target, "smoothing": "1/%d octave" % smoothing,
+           "deviation_third_octave": table, "biggest_issues": issues or ["within 3 dB of target"],
+           "low_coherence_hz": low, "arrival_ms": m.get("delay_ms"),
+           "room": m.get("room"), "rt60_s_mid": _rt_mid(m.get("room") or {})}
+    if low:
+        out["coherence_note"] = ("Readings at those frequencies are dominated by noise or "
+                                 "reverberation; don't EQ for them.")
+    if curves:
+        out["curves"] = {"hz": np.round(g, 1).tolist(), "mag_db": np.round(mag - np.mean(mag[ref] - t[ref]), 2).tolist(),
+                         "target_db": np.round(t, 2).tolist(), "phase_deg": np.round(m["phase_deg"], 1).tolist(),
+                         "coherence": np.round(m["coherence"], 3).tolist()}
+    return out
+
+
+@_tool(False, 'PA average')
+def wing_pa_average(names: list[str], as_name: str, overwrite: bool = False) -> dict:
+    """Combine measurements from several mic positions into one (power
+    average, each point weighted by its coherence) - EQ for the room, not
+    for one seat. Phase and arrival come from the first."""
+    try:
+        import numpy as np
+        ms = [_load_meas(n) for n in names]
+        path = _meas_path(as_name)
+    except (OSError, ValueError) as exc:
+        return _err(str(exc))
+    if os.path.exists(path) and not overwrite:
+        return _err("%r exists; pass overwrite=true." % as_name)
+    if len(ms) < 2:
+        return _err("Give at least two measurements.")
+    g = ms[0]["grid_hz"]
+    w = np.array([np.interp(g, m["grid_hz"], m["coherence"]) for m in ms]) + 1e-3
+    p = np.array([10 ** (np.interp(g, m["grid_hz"], m["mag_db"]) / 10) for m in ms])
+    mag = 10 * np.log10((w * p).sum(0) / w.sum(0))
+    out = dict(ms[0])
+    out.update(name=as_name, time=_time.strftime("%Y-%m-%d %H:%M"), mag_db=mag,
+               coherence=(w - 1e-3).mean(0), averaged_from=names,
+               delay_ms=round(float(np.mean([m.get("delay_ms", 0) for m in ms])), 3))
+    _save_meas(as_name, out)
+    spread = np.std([10 * np.log10(pp) for pp in p], axis=0)
+    band = (g >= 100) & (g <= 8000)
+    return {"ok": True, "name": as_name, "positions": len(ms),
+            "position_spread_db": round(float(np.median(spread[band])), 1),
+            "note": "Large spread (over 4 dB) means seats hear very different things - "
+                    "that's coverage or placement, which EQ can't fix for everyone."}
+
+
+@_tool(False, 'PA EQ')
+def wing_pa_eq(name: str, node: str = "/main/1/eq", target: str = "house",
+               target_points: list | None = None, bands: int = 6, fmin: float = 60.0,
+               fmax: float = 16000.0, max_boost: float = 3.0, max_cut: float = -12.0,
+               apply: bool = False, clear_shelves: bool = True) -> dict:
+    """Fit a parametric EQ that moves a measurement toward the target, for
+    the EQ of whatever feeds the PA (node: "/main/1/eq", "/mtx/1/eq").
+
+    Because the measurement's reference is that bus's OUTPUT (after its
+    EQ), the fitted bands are the whole correction: with apply=true they
+    replace the node's parametric bands (unused bands set to 0 dB, shelves
+    flattened if clear_shelves), after the node is saved as a preset named
+    "before-pa-eq ..." so it can be put back with wing_preset_load.
+
+    Fitting prefers cuts, caps boosts at max_boost, ignores frequencies
+    with poor coherence and narrow dips (cancellations that boost can't
+    fill). The node's EQ must be the STD model. Measure again afterwards."""
+    try:
+        import wing_dsp as wd
+        m = _load_meas(name)
+        d = _desk()
+    except (OSError, ValueError, RuntimeError) as exc:
+        return _err(str(exc))
+    p = (d.describe(node, with_values=True) or {}).get("params", {})
+    avail = sorted(int(k[:-1]) for k in p if _re.match(r"^\d+g$", k))
+    if not avail:
+        return _err("%s has no parametric bands." % node)
+    mdl = p.get("mdl", {}).get("value")
+    g = m["grid_hz"]
+    t = wd.target_curve(g, "custom" if target_points else target, target_points)
+    fit = wd.fit_eq(g, _smoothed(m, 12), t, m["coherence"], bands=min(bands, len(avail)),
+                    fmin=fmin, fmax=fmax, max_boost=max_boost, max_cut=max_cut,
+                    fs=float(m.get("rate", 48000)))
+    plan = {}
+    for i, b in zip(avail, fit["bands"]):
+        plan.update({"%df" % i: b["f"], "%dg" % i: b["g"], "%dq" % i: round(min(10.0, max(0.44, b["q"])), 2)})
+    for i in avail[len(fit["bands"]):]:
+        plan["%dg" % i] = 0
+    if clear_shelves:
+        for k in ("lg", "hg"):
+            if k in p:
+                plan[k] = 0
+    plan["on"] = 1
+    out = {"ok": True, "name": name, "node": node, "target": target, "eq_model": mdl,
+           "bands": fit["bands"], "rms_error_db": {"before": fit["rms_error_before_db"],
+                                                    "predicted_after": fit["rms_error_after_db"]},
+           "would_write": plan}
+    if mdl != "STD":
+        out["note"] = "The node's EQ model is %s; switch it to STD to apply these bands." % mdl
+        return out
+    if apply:
+        root = node.rsplit("/", 1)[0] if node.endswith("/eq") else node
+        stamp = _time.strftime("%Y%m%d-%H%M%S")
+        bk = wing_preset_save("before-pa-eq %s %s" % (root.strip("/").replace("/", "-"), stamp), [node],
+                              "EQ on %s before wing_pa_eq from %s" % (node, name))
+        try:
+            d.write_node(node, plan, verify=True)
+            out["applied"] = True
+            out["backup_preset"] = bk.get("name")
+        except wt.WriteRejected as exc:
+            out["applied"] = "write failed: %s" % exc
+    return out
+
+
+@_tool(False, 'PA align')
+def wing_pa_align(a: str, b: str, node_a: str | None = None, node_b: str | None = None,
+                  apply: bool = False) -> dict:
+    """Time-align two parts of the PA - mains and subs, mains and a delay
+    fill, left and centre - from two measurements made with the SAME mic
+    position, each with only that part playing (or each referenced to the
+    bus that feeds it).
+
+    Reports which arrives first and by how much (the earlier one gets that
+    much delay), and whether the two are in or out of polarity where their
+    responses overlap. node_a / node_b: the buses feeding each part
+    ("/main/1", "/mtx/2"); with apply=true the delay goes on the earlier
+    part's output delay and, if they cancel, polarity is flipped on b."""
+    try:
+        import numpy as np
+        ma, mb = _load_meas(a), _load_meas(b)
+    except (OSError, ValueError) as exc:
+        return _err(str(exc))
+    da, db = float(ma["delay_ms"]), float(mb["delay_ms"])
+    diff = db - da
+    early, late, early_node = (a, b, node_a) if diff > 0 else (b, a, node_b)
+    g = ma["grid_hz"]
+    mb_mag = np.interp(g, mb["grid_hz"], mb["mag_db"])
+    mb_ph = np.interp(g, mb["grid_hz"], mb["phase_deg"])
+    mb_coh = np.interp(g, mb["grid_hz"], mb["coherence"])
+    overlap = (np.abs(ma["mag_db"] - mb_mag) < 6) & (ma["coherence"] > 0.7) & (mb_coh > 0.7) & (g < 2000)
+    out = {"ok": True, "arrival_ms": {a: da, b: db}, "earlier": early,
+           "delay_needed_ms": round(abs(diff), 3), "delay_needed_m": round(abs(diff) / 1000 * 343, 2)}
+    if overlap.sum() >= 5:
+        dphi = np.angle(np.mean(np.exp(1j * np.radians(mb_ph[overlap] - ma["phase_deg"][overlap]))), deg=True)
+        out["overlap_hz"] = [round(float(g[overlap].min())), round(float(g[overlap].max()))]
+        out["phase_difference_deg"] = round(float(dphi), 0)
+        out["polarity"] = "opposed - flip one" if abs(dphi) > 120 else "same"
+    else:
+        out["polarity"] = "no clear overlap region to compare"
+    if apply:
+        done = {}
+        if early_node:
+            meters = round(max(0.1, abs(diff) / 1000 * 343), 1)
+            try:
+                _desk().write_node(early_node + "/dly", {"mode": "M", "dly": meters, "on": 1}, verify=True)
+                done[early_node + "/dly"] = {"mode": "M", "dly": meters, "on": 1}
+            except wt.WriteRejected as exc:
+                done["delay"] = "write failed: %s" % exc
+        if out.get("polarity", "").startswith("opposed") and node_b:
+            node = node_b + "/in/set"
+            cur = (_desk().describe(node, with_values=True) or {}).get("params", {}).get("inv", {}).get("value")
+            try:
+                _desk().write_node(node, {"inv": 0 if str(cur) == "1" else 1}, verify=True)
+                done[node] = "polarity flipped"
+            except wt.WriteRejected as exc:
+                done["polarity"] = "write failed: %s" % exc
+        out["applied"] = done or "nothing to apply (give node_a/node_b)"
+    out["next"] = "Measure both together afterwards: the sum should rise smoothly through the crossover."
+    return out
+
+
+@_tool(True, 'Room acoustics')
+def wing_pa_room(name: str) -> dict:
+    """The room's acoustics from a saved measurement (ISO 3382): per octave
+    band, reverberation time (T20/T30, and EDT - how reverberant it sounds),
+    clarity C50 (speech) and C80 (music) and definition D50. For a
+    sanctuary: speech is clear with C50 above 0 dB and D50 over 50 %;
+    T30 around 1-1.5 s suits congregational singing, under 1 s spoken word.
+    Best from a pink-noise measurement of 20 s or more."""
+    try:
+        m = _load_meas(name)
+    except (OSError, ValueError) as exc:
+        return _err(str(exc))
+    room = m.get("room") or {}
+    rt = _rt_mid(room)
+    c50 = [room.get(k, {}).get("C50_db") for k in ("500", "1000", "2000") if room.get(k)]
+    c50 = round(sum(c50) / len(c50), 1) if c50 else None
+    notes = []
+    if rt:
+        notes.append("mid-band RT %.2f s: %s" % (rt, "dry - great for speech, little support for singing"
+                                                  if rt < 0.8 else "balanced for speech and worship" if rt < 1.6
+                                                  else "live - speech clarity will suffer; keep the PA off the walls"))
+    if c50 is not None:
+        notes.append("speech clarity C50 %.1f dB: %s" % (c50, "good" if c50 > 2 else "fair" if c50 > -2 else "poor"))
+    return {"ok": True, "name": name, "bands": room, "rt60_s_mid": rt, "c50_db_mid": c50,
+            "summary": notes, "stimulus": m.get("stimulus"),
+            "caveat": "From programme material RT can read short; pink noise is more reliable."
+            if m.get("stimulus") == "program" else None}
 
 
 if __name__ == "__main__":
