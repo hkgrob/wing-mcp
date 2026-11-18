@@ -3,3 +3,5 @@ __pycache__/
 # Third-party reference documents are copyrighted; keep them out of the public repo.
 *.pdf
 dist/
+outputs/
+.DS_Store
